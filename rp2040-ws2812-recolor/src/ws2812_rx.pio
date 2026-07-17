@@ -1,0 +1,16 @@
+; Samples each WS2812 bit near the center of the gap between T0H and T1H.
+; At an 8 MHz PIO clock, jmp pin samples about 500 ns after the rising edge.
+.program ws2812_rx
+
+.wrap_target
+bit_start:
+    wait 1 pin 0
+    nop             [2]
+    jmp pin bit_one
+    in null, 1
+    wait 0 pin 0
+    jmp bit_start
+bit_one:
+    in pins, 1
+    wait 0 pin 0
+.wrap
