@@ -1,12 +1,13 @@
 # RP2040 WS2812 Recolor
 
-Firmware for a Waveshare RP2040-Zero that receives an 800 kHz WS2812 data
-stream and retransmits the same pixel pattern in a chosen color. The default
-target is red.
+Firmware for a Waveshare RP2040-Zero that receives the Hasbro cyclotron's
+800 kHz WS2812 data stream and drives four replacement LEDs in a chosen color.
+The default target is red.
 
-The input pixel's strongest RGB channel is used as its brightness. An off pixel
-therefore remains off, a dim pixel remains dim, and any lit color becomes red.
-The output follows the input with approximately one LED of latency.
+Live capture showed that each factory cyclotron lens uses three of the 12 input
+addresses. The groups are 2-4, 5-7, 8-10, and 11-12 plus 1. Each group's
+brightness is averaged into one output LED, preserving the wraparound sequence
+without driving three replacement LEDs at once.
 
 ## Wiring
 
@@ -54,3 +55,21 @@ Pin assignments and target RGB values are near the top of `src/main.c`:
 
 The receiver expects standard 24-bit, MSB-first, GRB WS2812/SK6812 data at
 800 kHz. RGBW strips and 400 kHz variants are not supported by this version.
+
+## Serial diagnostics
+
+USB serial reports changed frames and each LED instructed to turn on. Repeated
+identical frames are suppressed. Diagnostics run on the RP2040's second core so
+USB output cannot block the time-sensitive LED forwarding loop. LED numbering
+starts at 1. Connect at 115200 baud; the USB CDC connection does not depend on
+the selected baud rate, but 115200 is a convenient terminal default.
+
+Example:
+
+```text
+Frame 12: 12 inputs -> 4 cyclotron LEDs
+  Cyclotron LED 2: brightness 255 -> RED(255)
+```
+
+The diagnostic frame buffer holds 256 pixels. Recoloring and output continue if
+a larger frame arrives, but only the first 256 pixels are listed in the report.

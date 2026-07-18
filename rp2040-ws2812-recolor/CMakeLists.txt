@@ -21,6 +21,7 @@ pico_generate_pio_header(ws2812_recolor
 
 target_link_libraries(ws2812_recolor
     pico_stdlib
+    pico_multicore
     hardware_pio
 )
 
