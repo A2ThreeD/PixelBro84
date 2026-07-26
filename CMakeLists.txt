@@ -5,6 +5,7 @@
 
 cmake_minimum_required(VERSION 3.13)
 
+# Import and initialize the Raspberry Pi Pico SDK toolchain.
 include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
 project(PixelBro84 C CXX ASM)
@@ -14,13 +15,15 @@ option(ENABLE_USB_DIAGNOSTICS "Enable USB CDC frame diagnostics" OFF)
 
 pico_sdk_init()
 
+# Build the firmware and attach the identity shown by Pico tooling.
 add_executable(PixelBro84
     src/main.c
 )
 
 pico_set_program_name(PixelBro84 "PixelBro84")
-pico_set_program_version(PixelBro84 "0.8.0")
+pico_set_program_version(PixelBro84 "0.9.0")
 
+# Compile both PIO assembly programs into headers consumed by main.c.
 pico_generate_pio_header(PixelBro84
     ${CMAKE_CURRENT_LIST_DIR}/src/ws2812_rx.pio
 )
@@ -36,6 +39,7 @@ target_link_libraries(PixelBro84
     hardware_pio
 )
 
+# USB diagnostics are optional; UART output remains disabled in all builds.
 if(ENABLE_USB_DIAGNOSTICS)
     target_compile_definitions(PixelBro84 PRIVATE ENABLE_USB_DIAGNOSTICS=1)
     pico_enable_stdio_usb(PixelBro84 1)

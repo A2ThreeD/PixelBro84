@@ -9,6 +9,8 @@
 ; At an 8 MHz PIO clock, jmp pin samples about 500 ns after the rising edge.
 .program ws2812_rx
 
+; Wait for the rising edge, sample at the configured midpoint, shift a zero
+; or one into the ISR, and wait for the signal to return low before repeating.
 .wrap_target
 bit_start:
     wait 1 pin 0

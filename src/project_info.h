@@ -2,8 +2,8 @@
  * Project:    PixelBro84
  * Programmer: Aaron Morris
  * Company:    A2ThreeD
- * Version:    0.8.0
- * Date:       2026-07-25
+ * Version:    0.9.0
+ * Date:       2026-07-26
  *
  * Copyright (c) 2026 Aaron Morris / A2ThreeD.
  *
@@ -24,18 +24,21 @@
 #ifndef A2THREED_PIXELBRO84_PROJECT_INFO_H
 #define A2THREED_PIXELBRO84_PROJECT_INFO_H
 
+// Human-readable identity embedded in the firmware image.
 #define PROJECT_NAME "PixelBro84"
 #define PROJECT_PROGRAMMER "Aaron Morris"
 #define PROJECT_COMPANY "A2ThreeD"
 
+// Keep the numeric components and display string synchronized for releases.
 #define PROJECT_VERSION_MAJOR 0
-#define PROJECT_VERSION_MINOR 8
+#define PROJECT_VERSION_MINOR 9
 #define PROJECT_VERSION_PATCH 0
-#define PROJECT_VERSION_STRING "0.8.0"
-#define PROJECT_RELEASE_DATE "2026-07-25"
+#define PROJECT_VERSION_STRING "0.9.0"
+#define PROJECT_RELEASE_DATE "2026-07-26"
 
+// License and release summary reported by the Pico binary metadata.
 #define PROJECT_LICENSE "PolyForm-Noncommercial-1.0.0"
 #define PROJECT_CHANGE_SUMMARY \
-    "Renamed to PixelBro84; added low-power mode, persistent bypass, and licensing metadata"
+    "Added synchronized, configurable cyclotron cake output on GPIO28"
 
 #endif

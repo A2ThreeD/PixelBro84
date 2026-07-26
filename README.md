@@ -2,14 +2,15 @@
 
 | Project field | Value |
 | --- | --- |
-| Version | 0.8.0 |
-| Release date | July 25, 2026 |
+| Version | 0.9.0 |
+| Release date | July 26, 2026 |
 | Programmer | Aaron Morris |
 | Company | A2ThreeD |
 
-Firmware for a Waveshare (or clone) RP2040-Zero that receives the Hasbro cyclotron's
-800 kHz WS2812 data stream and drives four replacement RGB WS2812B LEDs in a chosen color.
-The default color is red.
+Firmware for a Waveshare (or clone) RP2040-Zero that receives the Hasbro
+cyclotron's 800 kHz WS2812 data stream and drives four replacement RGB WS2812B
+LEDs in a chosen color. It also drives a synchronized cyclotron cake string on
+GPIO28. Both outputs default to red.
 
 ## License
 
@@ -49,6 +50,7 @@ their exact 8 MHz receive and 800 kHz transmit rates.
 | --- | --- |
 | Incoming WS2812 data | GPIO2 |
 | Recolored WS2812 output | GPIO3 |
+| Cyclotron cake WS2812 output | GPIO28 |
 | Cyclotron lid sense, grounded when closed | GPIO4 |
 | Cyclotron lid open-drain output | GPIO29 |
 | Source/controller ground | GND |
@@ -56,6 +58,28 @@ their exact 8 MHz receive and 800 kHz transmit rates.
 
 The controller, RP2040-Zero, and LED power supply must share ground. The voltages that I've measure on the Hasbro 1984 pack are around 4.2V for the cyclotron LED output on the factory electronics. It's a good idea to use a 5V tolerant buffer or a
 resistor divider on GPIO2 when the source logic level exceeds 3.3V. My builds use a 1K/2K voltage divider circuit as an inexpensive method. A 220-470 ohm series resistor near the output driver is also recommended.
+
+GPIO28 drives the data input of the first cake WS2812 LED. The cake string must
+share ground with the RP2040 and its LED power supply. Use the same appropriate
+logic-level shifting and series-resistor practices described for GPIO3.
+
+## Cyclotron cake
+
+The cake defaults to 12 red WS2812 LEDs. Its animation is derived directly from
+the captured 12-position factory sequence, so it does not use a separate timer
+that can drift out of sync. Cake LED 1 aligns with cyclotron LED 1, and each
+quarter-turn aligns with the next outer cyclotron LED. When the configured LED
+count is not 12, PixelBro84 interpolates the factory sequence evenly around the
+cake.
+
+Set the cake length and fixed RGB color near the top of `src/main.c`:
+
+```c
+#define CAKE_LED_COUNT   12u
+#define CAKE_COLOR_RED   255u
+#define CAKE_COLOR_GREEN 0u
+#define CAKE_COLOR_BLUE  0u
+```
 
 ## Cyclotron lid switch
 
@@ -95,6 +119,7 @@ Pin assignments and target RGB values are near the top of `src/main.c`:
 ```c
 #define WS2812_INPUT_PIN  2u
 #define WS2812_OUTPUT_PIN 3u
+#define CAKE_OUTPUT_PIN   28u
 #define LID_SENSE_PIN     4u
 #define LID_OUTPUT_PIN    29u
 #define LID_DETECTION_BYPASS false

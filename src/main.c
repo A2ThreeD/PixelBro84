@@ -11,7 +11,19 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "hardware/clocks.h"
+#if defined(__has_include)
+#  if __has_include(<hardware/clocks.h>)
+#    include <hardware/clocks.h>
+#  else
+#    include <stdbool.h>
+#    include <stdint.h>
+extern bool set_sys_clock_khz(uint32_t sys_clock_khz, bool required);
+extern uint32_t clock_get_hz(uint32_t clk);
+static const uint32_t clk_sys = 1u;
+#  endif
+#else
+#  include <hardware/clocks.h>
+#endif
 #include "hardware/flash.h"
 #include "hardware/irq.h"
 #include "hardware/pio.h"
@@ -29,6 +41,7 @@
 #include "ws2812_rx.pio.h"
 #include "ws2812_tx.pio.h"
 
+// Compile-time feature switches and firmware metadata exposed to picotool.
 #ifndef ENABLE_USB_DIAGNOSTICS
 #define ENABLE_USB_DIAGNOSTICS 0
 #endif
@@ -40,12 +53,21 @@ bi_decl(bi_program_description(PROJECT_CHANGE_SUMMARY));
 // Waveshare RP2040-Zero pins. Change these if your wiring uses other GPIOs.
 #define WS2812_INPUT_PIN  2u
 #define WS2812_OUTPUT_PIN 3u
+#define CAKE_OUTPUT_PIN   28u
 #define LID_SENSE_PIN     4u
 #define LID_OUTPUT_PIN    29u
 
 // Set true to permanently force bypass regardless of the saved setting.
 #define LID_DETECTION_BYPASS false
 
+// Cyclotron cake configuration. The cake color is independent of the
+// BOOT-selected outer cyclotron color.
+#define CAKE_LED_COUNT   12u
+#define CAKE_COLOR_RED   255u
+#define CAKE_COLOR_GREEN 0u
+#define CAKE_COLOR_BLUE  0u
+
+// WS2812 timing, frame dimensions, and input polling intervals.
 #define WS2812_BIT_RATE 800000.0f
 #define WS2812_RX_CLOCK 8000000.0f
 #define SYSTEM_CLOCK_KHZ 48000u
@@ -55,6 +77,7 @@ bi_decl(bi_program_description(PROJECT_CHANGE_SUMMARY));
 #define HASBRO_INPUT_PIXELS 12u
 #define OUTPUT_LED_COUNT 4u
 #define INPUTS_PER_OUTPUT 3u
+#define CAKE_PHASE_ORIGIN_INPUT_INDEX 2u
 #define BUTTON_POLL_MS 10u
 #define BUTTON_DEBOUNCE_MS 30u
 #define BUTTON_LONG_PRESS_MS 2000u
@@ -63,10 +86,13 @@ bi_decl(bi_program_description(PROJECT_CHANGE_SUMMARY));
 #define COLOR_SAVE_DELAY_MS 1000u
 #define CONFIG_FLASH_ON_MS 150u
 #define CONFIG_FLASH_OFF_MS 120u
+
+// The final flash sector is used as a wear-leveled settings journal.
 #define COLOR_SETTINGS_MAGIC 0x434f4c52u
 #define COLOR_SETTINGS_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 #define COLOR_SETTINGS_SLOTS (FLASH_SECTOR_SIZE / FLASH_PAGE_SIZE)
 
+// User-selectable output colors retain the source frame's brightness.
 typedef struct {
     uint8_t red;
     uint8_t green;
@@ -74,6 +100,8 @@ typedef struct {
     const char *name;
 } output_color_t;
 
+// Each settings record occupies one flash page and includes inverted fields
+// plus a checksum so interrupted or corrupt writes can be rejected at boot.
 typedef struct {
     uint32_t magic;
     uint32_t sequence;
@@ -104,6 +132,16 @@ static const output_color_t output_colors[] = {
 
 #define OUTPUT_COLOR_COUNT (sizeof(output_colors) / sizeof(output_colors[0]))
 
+static const output_color_t cake_color = {
+    CAKE_COLOR_RED,
+    CAKE_COLOR_GREEN,
+    CAKE_COLOR_BLUE,
+    "Configured RGB",
+};
+
+_Static_assert(CAKE_LED_COUNT > 0, "The cyclotron cake needs at least one LED");
+
+// A captured source frame is also the unit passed to optional diagnostics.
 typedef struct {
     uint32_t number;
     uint32_t pixels[MAX_FRAME_PIXELS];
@@ -113,6 +151,7 @@ typedef struct {
     bool truncated;
 } diagnostic_frame_t;
 
+// State shared by frame capture, settings persistence, and the second core.
 static diagnostic_frame_t capture_frame;
 #if ENABLE_USB_DIAGNOSTICS
 static queue_t diagnostic_queue;
@@ -135,6 +174,7 @@ enum {
     LID_STATE_BYPASSED,
 };
 
+// Wake-up support lets the main core sleep between incoming pixels and polls.
 static bool idle_wake_timer_callback(repeating_timer_t *timer) {
     (void)timer;
     return true;
@@ -166,6 +206,8 @@ static void sleep_until_input_or_timer(PIO pio, uint sm) {
     restore_interrupts(flags);
 }
 
+// Lid control uses an open-drain-style output: drive low when active and
+// switch to a high-impedance input when inactive.
 static void set_lid_output(bool pull_low) {
     // The output latch always stays low. Direction controls whether GPIO29
     // actively sinks the line or presents a high-impedance input.
@@ -192,6 +234,8 @@ static void lid_switch_init(void) {
     }
 }
 
+// BOOTSEL shares the QSPI chip-select pin, so reads must run from RAM while
+// core 1 is locked out from flash access.
 static bool __no_inline_not_in_flash_func(read_bootsel_pressed_raw)(void) {
     const uint cs_pin_index = 1;
     const uint32_t flags = save_and_disable_interrupts();
@@ -219,6 +263,8 @@ static bool read_bootsel_pressed(void) {
     return pressed;
 }
 
+// Settings validation accepts the previous color-only record format as well
+// as the current format containing the lid-bypass preference.
 static uint32_t legacy_color_settings_checksum(uint32_t sequence,
                                                uint8_t color_index) {
     return COLOR_SETTINGS_MAGIC ^ sequence ^ color_index ^ 0xa5c35a3cu;
@@ -258,6 +304,7 @@ static bool color_settings_record_valid(const color_settings_record_t *record,
                                        record->bypass_enabled != 0);
 }
 
+// Scan the flash journal for the newest valid record and the next free page.
 static void load_color_setting(void) {
     const color_settings_record_t *records =
         (const color_settings_record_t *)(XIP_BASE + COLOR_SETTINGS_OFFSET);
@@ -281,6 +328,8 @@ static void load_color_setting(void) {
     }
 }
 
+// Flash erase/program code must execute from RAM because XIP is unavailable
+// while the onboard flash is being modified.
 static void __not_in_flash_func(write_color_setting_flash)(void *parameter) {
     const color_flash_write_t *write = (const color_flash_write_t *)parameter;
     if (write->erase_sector) {
@@ -291,6 +340,7 @@ static void __not_in_flash_func(write_color_setting_flash)(void *parameter) {
                         FLASH_PAGE_SIZE);
 }
 
+// Append a settings record, erasing and restarting the journal when full.
 static bool save_color_setting(void) {
     const bool erase_sector =
         color_settings_next_slot >= COLOR_SETTINGS_SLOTS;
@@ -324,6 +374,7 @@ static bool save_color_setting(void) {
     return true;
 }
 
+// Configure a PIO state machine to decode incoming 24-bit GRB pixels.
 static void ws2812_rx_init(PIO pio, uint sm, uint offset, uint pin) {
     pio_gpio_init(pio, pin);
     gpio_pull_down(pin);
@@ -340,6 +391,7 @@ static void ws2812_rx_init(PIO pio, uint sm, uint offset, uint pin) {
     pio_sm_init(pio, sm, offset, &config);
 }
 
+// A continuous low interval marks the boundary between WS2812 frames.
 static void wait_for_ws2812_reset(uint pin) {
     uint64_t low_started_us = 0;
     while (true) {
@@ -366,6 +418,7 @@ static void restart_ws2812_rx(PIO pio, uint sm, uint offset) {
     pio_sm_set_enabled(pio, sm, true);
 }
 
+// Configure a PIO state machine to transmit 24-bit GRB pixels at 800 kHz.
 static void ws2812_tx_init(PIO pio, uint sm, uint offset, uint pin) {
     pio_gpio_init(pio, pin);
     pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
@@ -382,6 +435,8 @@ static void ws2812_tx_init(PIO pio, uint sm, uint offset, uint pin) {
     pio_sm_set_enabled(pio, sm, true);
 }
 
+// Color conversion helpers reduce an input pixel to brightness, then apply
+// that brightness to the selected output color.
 static inline uint8_t max3(uint8_t a, uint8_t b, uint8_t c) {
     uint8_t maximum = a > b ? a : b;
     return maximum > c ? maximum : c;
@@ -409,7 +464,39 @@ static uint8_t mapped_brightness(const diagnostic_frame_t *frame,
     return input_brightness(frame->pixels[center_input_index]);
 }
 
-static void output_frame(PIO pio, uint sm, const diagnostic_frame_t *frame) {
+static uint8_t cake_brightness(const diagnostic_frame_t *frame,
+                               uint cake_index) {
+    // Rotate the 12-position factory phase so cake LED 1 starts at input 3,
+    // the center of cyclotron lens 1. At every quarter of a divisible cake
+    // length, the phase lands on inputs 6, 9, and 12 for lenses 2, 3, and 4.
+    // Linear interpolation keeps other cake lengths evenly spaced.
+    const uint64_t phase_numerator =
+        (uint64_t)cake_index * HASBRO_INPUT_PIXELS;
+    const uint source_step = (uint)(phase_numerator / CAKE_LED_COUNT);
+    const uint64_t remainder = phase_numerator % CAKE_LED_COUNT;
+    const uint source_index =
+        (CAKE_PHASE_ORIGIN_INPUT_INDEX + source_step) % HASBRO_INPUT_PIXELS;
+    const uint next_source_index = (source_index + 1u) % HASBRO_INPUT_PIXELS;
+    const uint8_t brightness = input_brightness(frame->pixels[source_index]);
+    const uint8_t next_brightness =
+        input_brightness(frame->pixels[next_source_index]);
+
+    return (uint8_t)(
+        ((uint64_t)brightness * (CAKE_LED_COUNT - remainder) +
+         (uint64_t)next_brightness * remainder + CAKE_LED_COUNT / 2u) /
+        CAKE_LED_COUNT);
+}
+
+static uint32_t recolored_grb(const output_color_t *color,
+                              uint8_t brightness) {
+    return ((uint32_t)scale_channel(color->green, brightness) << 16) |
+           ((uint32_t)scale_channel(color->red, brightness) << 8) |
+           scale_channel(color->blue, brightness);
+}
+
+// Emit one completed source frame to the four outer cyclotron LEDs.
+static void output_cyclotron_frame(PIO pio, uint sm,
+                                   const diagnostic_frame_t *frame) {
     if (frame->pixel_count != HASBRO_INPUT_PIXELS) {
         return;
     }
@@ -417,11 +504,29 @@ static void output_frame(PIO pio, uint sm, const diagnostic_frame_t *frame) {
     for (uint output_index = 0; output_index < OUTPUT_LED_COUNT; ++output_index) {
         const uint8_t brightness = mapped_brightness(frame, output_index);
         const output_color_t *color = &output_colors[selected_color_index];
-        const uint32_t output_grb =
-            ((uint32_t)scale_channel(color->green, brightness) << 16) |
-            ((uint32_t)scale_channel(color->red, brightness) << 8) |
-            scale_channel(color->blue, brightness);
-        pio_sm_put_blocking(pio, sm, output_grb << 8);
+        pio_sm_put_blocking(pio, sm,
+                            recolored_grb(color, brightness) << 8);
+    }
+}
+
+// Emit the same animation phase to the independently colored cake LEDs.
+static void output_cake_frame(PIO pio, uint sm,
+                              const diagnostic_frame_t *frame) {
+    if (frame->pixel_count != HASBRO_INPUT_PIXELS) {
+        return;
+    }
+
+    for (uint cake_index = 0; cake_index < CAKE_LED_COUNT; ++cake_index) {
+        pio_sm_put_blocking(
+            pio, sm,
+            recolored_grb(&cake_color,
+                          cake_brightness(frame, cake_index)) << 8);
+    }
+}
+
+static void output_cake_off(PIO pio, uint sm) {
+    for (uint index = 0; index < CAKE_LED_COUNT; ++index) {
+        pio_sm_put_blocking(pio, sm, 0u);
     }
 }
 
@@ -433,6 +538,7 @@ static void output_all_red(PIO pio, uint sm, bool on) {
 }
 
 #if ENABLE_USB_DIAGNOSTICS
+// Render frame mapping details as human-readable USB serial output.
 static void print_frame(const diagnostic_frame_t *frame) {
     if (frame->pixel_count == HASBRO_INPUT_PIXELS) {
         const output_color_t *color = &output_colors[frame->color_index];
@@ -441,9 +547,14 @@ static void print_frame(const diagnostic_frame_t *frame) {
                                      : frame->lid_state == LID_STATE_CLOSED
                                            ? "Closed"
                                            : "Open";
-        printf("Frame %lu: 12 inputs -> 4 cyclotron LEDs, color %s, lid %s%s\n",
+        printf("Frame %lu: 12 inputs -> 4 cyclotron LEDs + %u cake LEDs, "
+               "color %s, cake RGB(%u,%u,%u), lid %s%s\n",
                (unsigned long)frame->number,
+               CAKE_LED_COUNT,
                color->name,
+               cake_color.red,
+               cake_color.green,
+               cake_color.blue,
                lid_status,
                frame->truncated ? " (diagnostic buffer full)" : "");
         for (uint output_index = 0; output_index < OUTPUT_LED_COUNT;
@@ -452,6 +563,15 @@ static void print_frame(const diagnostic_frame_t *frame) {
             if (brightness > 0) {
                 printf("  Cyclotron LED %u: brightness %u -> %s\n",
                        output_index + 1, brightness, color->name);
+            }
+        }
+        for (uint cake_index = 0; cake_index < CAKE_LED_COUNT; ++cake_index) {
+            const uint8_t brightness =
+                cake_brightness(frame, cake_index);
+            if (brightness > 0) {
+                printf("  Cake LED %u: brightness %u -> RGB(%u,%u,%u)\n",
+                       cake_index + 1, brightness,
+                       cake_color.red, cake_color.green, cake_color.blue);
             }
         }
         fflush(stdout);
@@ -496,6 +616,8 @@ static bool frames_match(const diagnostic_frame_t *a,
 }
 #endif
 
+// Core 1 participates in safe flash operations and, when enabled, drains the
+// diagnostic queue so serial output never delays time-sensitive frame capture.
 static void diagnostics_core(void) {
     flash_safe_execute_core_init();
     multicore_fifo_push_blocking(1u);
@@ -521,6 +643,7 @@ static void diagnostics_core(void) {
 }
 
 int main(void) {
+    // Restore saved preferences and bring up GPIO, multicore, and PIO hardware.
     set_sys_clock_khz(SYSTEM_CLOCK_KHZ, true);
 #if ENABLE_USB_DIAGNOSTICS
     stdio_init_all();
@@ -539,9 +662,11 @@ int main(void) {
     const uint tx_offset = pio_add_program(pio, &ws2812_tx_program);
     const uint rx_sm = pio_claim_unused_sm(pio, true);
     const uint tx_sm = pio_claim_unused_sm(pio, true);
+    const uint cake_tx_sm = pio_claim_unused_sm(pio, true);
 
     ws2812_rx_init(pio, rx_sm, rx_offset, WS2812_INPUT_PIN);
     ws2812_tx_init(pio, tx_sm, tx_offset, WS2812_OUTPUT_PIN);
+    ws2812_tx_init(pio, cake_tx_sm, tx_offset, CAKE_OUTPUT_PIN);
     wait_for_ws2812_reset(WS2812_INPUT_PIN);
     restart_ws2812_rx(pio, rx_sm, rx_offset);
     pio_rx_wake_init(pio, rx_sm);
@@ -550,12 +675,17 @@ int main(void) {
                            &idle_wake_timer);
 
 #if ENABLE_USB_DIAGNOSTICS
-    printf("%s v%s: GPIO %u -> GPIO %u, color %s\n",
+    printf("%s v%s: GPIO %u -> GPIO %u (4 LEDs, %s), "
+           "GPIO %u (%u cake LEDs, RGB(%u,%u,%u))\n",
            PROJECT_NAME, PROJECT_VERSION_STRING,
            WS2812_INPUT_PIN, WS2812_OUTPUT_PIN,
-           output_colors[selected_color_index].name);
+           output_colors[selected_color_index].name,
+           CAKE_OUTPUT_PIN, CAKE_LED_COUNT,
+           cake_color.red, cake_color.green, cake_color.blue);
 #endif
 
+    // Runtime state for frame boundaries, debounced controls, deferred flash
+    // writes, and the visual confirmation sequence.
     uint32_t frame_number = 0;
     absolute_time_t last_pixel_time = get_absolute_time();
     absolute_time_t next_button_poll = get_absolute_time();
@@ -575,6 +705,7 @@ int main(void) {
     uint8_t config_flash_phase = 0;
 
     while (true) {
+        // Capture every complete GRB pixel pushed by the RX state machine.
         if (!pio_sm_is_rx_fifo_empty(pio, rx_sm)) {
             // RX autopushes once per complete 24-bit GRB pixel. The complete
             // frame is retained so the Hasbro address groups can be mapped.
@@ -591,6 +722,8 @@ int main(void) {
             continue;
         }
 
+        // Treat the WS2812 reset-length idle gap as the end of the frame,
+        // then map and transmit it to both output chains.
         if (receiving_frame &&
             absolute_time_diff_us(last_pixel_time, get_absolute_time()) >=
                 WS2812_RESET_US) {
@@ -602,7 +735,8 @@ int main(void) {
                                           : lid_closed ? LID_STATE_CLOSED
                                                        : LID_STATE_OPEN;
             if (config_flash_phase == 0) {
-                output_frame(pio, tx_sm, &capture_frame);
+                output_cyclotron_frame(pio, tx_sm, &capture_frame);
+                output_cake_frame(pio, cake_tx_sm, &capture_frame);
             }
 #if ENABLE_USB_DIAGNOSTICS
             queue_try_add(&diagnostic_queue, &capture_frame);
@@ -612,6 +746,7 @@ int main(void) {
             receiving_frame = false;
         }
 
+        // Debounce the lid input and mirror it through the open-drain output.
         if (!lid_bypass_active() && time_reached(next_lid_poll)) {
             next_lid_poll = delayed_by_ms(next_lid_poll, LID_POLL_MS);
             const bool closed = !gpio_get(LID_SENSE_PIN);
@@ -627,6 +762,7 @@ int main(void) {
             }
         }
 
+        // A short BOOTSEL press cycles colors; a long press toggles lid bypass.
         if (time_reached(next_button_poll)) {
             next_button_poll = delayed_by_ms(next_button_poll, BUTTON_POLL_MS);
             const bool pressed = read_bootsel_pressed();
@@ -670,6 +806,7 @@ int main(void) {
                 }
 
                 output_all_red(pio, tx_sm, true);
+                output_cake_off(pio, cake_tx_sm);
                 config_flash_phase = 1;
                 config_flash_at = delayed_by_ms(get_absolute_time(),
                                                 CONFIG_FLASH_ON_MS);
@@ -679,6 +816,7 @@ int main(void) {
             }
         }
 
+        // Advance the non-blocking two-flash confirmation animation.
         if (config_flash_phase != 0 && time_reached(config_flash_at)) {
             if (config_flash_phase == 1) {
                 output_all_red(pio, tx_sm, false);
@@ -696,6 +834,7 @@ int main(void) {
             }
         }
 
+        // Coalesce rapid setting changes before committing them to flash.
         if (color_save_pending && !button_pressed &&
             time_reached(color_save_at)) {
             if (save_color_setting()) {
@@ -706,6 +845,8 @@ int main(void) {
             }
         }
 
+        // Stay responsive during a frame; otherwise sleep until RX or a poll
+        // timer interrupt requires attention.
         if (receiving_frame) {
             tight_loop_contents();
         } else {

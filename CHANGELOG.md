@@ -2,6 +2,15 @@
 
 All notable project changes are documented here.
 
+## [0.9.0] - 2026-07-26
+
+- Added a dedicated WS2812 cyclotron cake output on GPIO28.
+- Added compile-time cake LED count and RGB configuration, defaulting to 12
+  red LEDs.
+- Synchronized cake movement to the captured factory sequence, with quarter
+  points aligned to the four outer cyclotron LEDs.
+- Added cake activity to optional USB diagnostics.
+
 ## [0.8.0] - 2026-07-25
 
 - Renamed the project and firmware artifacts to PixelBro84.

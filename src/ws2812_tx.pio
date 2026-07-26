@@ -9,10 +9,13 @@
 .program ws2812_tx
 .side_set 1
 
+; Cycle counts for the initial high pulse, remaining high time, and low time.
 .define public T1 2
 .define public T2 5
 .define public T3 3
 
+; Shift one bit into X, then select the shorter or longer high pulse while
+; sideset drives the data pin without consuming an extra instruction.
 .wrap_target
 bitloop:
     out x, 1        side 0 [T3 - 1]
