@@ -120,6 +120,10 @@ action and restored the next time the pack powers on. Settings use a small
 wear-leveled log in the final 4 KB flash sector. Holding BOOT while powering or
 resetting the board still enters the RP2040 UF2 bootloader.
 
+## Power Considerations
+
+The default mode of this project when idling and serial diagnostics enabled seemed to show about a 22mA draw. Disabling diagnostics and adding sleep should reduce that considerably, but I don't have a meter with resolution good enough to measure it now. With the pack fully powered up and this mod, it seems to consume around 100mA.
+
 ## Serial diagnostics
 
 USB diagnostics are disabled by default to reduce idle power. Enable them in a
