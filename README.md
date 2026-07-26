@@ -7,9 +7,9 @@
 | Programmer | Aaron Morris |
 | Company | A2ThreeD |
 
-Firmware for a Waveshare RP2040-Zero that receives the Hasbro cyclotron's
-800 kHz WS2812 data stream and drives four replacement LEDs in a chosen color.
-The default target is red.
+Firmware for a Waveshare (or clone) RP2040-Zero that receives the Hasbro cyclotron's
+800 kHz WS2812 data stream and drives four replacement RGB WS2812B LEDs in a chosen color.
+The default color is red.
 
 ## License
 
@@ -54,12 +54,8 @@ their exact 8 MHz receive and 800 kHz transmit rates.
 | Source/controller ground | GND |
 | LED power-supply ground | GND |
 
-The controller, RP2040-Zero, and LED power supply must share ground. Do not feed
-a 5 V data signal directly into the RP2040. Use a 5 V-tolerant buffer or a
-resistor divider on GPIO2 when the source logic level exceeds 3.3 V. For a
-reliable 5 V WS2812 output, use a 74AHCT125 or 74HCT245 level shifter between
-GPIO3 and the first LED. A 220-470 ohm series resistor near the output driver is
-also recommended.
+The controller, RP2040-Zero, and LED power supply must share ground. The voltages that I've measure on the Hasbro 1984 pack are around 4.2V for the cyclotron LED output on the factory electronics. It's a good idea to use a 5V tolerant buffer or a
+resistor divider on GPIO2 when the source logic level exceeds 3.3V. My builds use a 1K/2K voltage divider circuit as an inexpensive method. A 220-470 ohm series resistor near the output driver is also recommended.
 
 ## Cyclotron lid switch
 
@@ -107,7 +103,7 @@ Pin assignments and target RGB values are near the top of `src/main.c`:
 The receiver expects standard 24-bit, MSB-first, GRB WS2812/SK6812 data at
 800 kHz. RGBW strips and 400 kHz variants are not supported by this version.
 
-## Color button
+## Function button
 
 Momentarily press and release BOOT while the firmware is running to cycle the
 output color:
@@ -118,6 +114,7 @@ Red -> Green -> Blue -> Yellow -> Purple -> Red
 
 Hold BOOT for two seconds while running to toggle the cyclotron lid bypass. All
 four output LEDs flash red together twice to confirm the configuration change.
+
 The selected color and bypass state are saved one second after the last button
 action and restored the next time the pack powers on. Settings use a small
 wear-leveled log in the final 4 KB flash sector. Holding BOOT while powering or
