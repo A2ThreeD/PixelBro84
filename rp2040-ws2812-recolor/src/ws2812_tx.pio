@@ -1,3 +1,10 @@
+; PixelBro84
+; Programmer: Aaron Morris, A2ThreeD
+; Version: 0.8.0 (2026-07-25)
+; Copyright (c) 2026 Aaron Morris / A2ThreeD
+; SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+; See LICENSE and THIRD_PARTY_NOTICES.md.
+;
 ; Standard 800 kHz WS2812 transmitter. One bit occupies ten PIO cycles.
 .program ws2812_tx
 .side_set 1

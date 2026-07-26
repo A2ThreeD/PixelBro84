@@ -1,3 +1,10 @@
+; PixelBro84
+; Programmer: Aaron Morris, A2ThreeD
+; Version: 0.8.0 (2026-07-25)
+; Copyright (c) 2026 Aaron Morris / A2ThreeD
+; SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+; See LICENSE and THIRD_PARTY_NOTICES.md.
+;
 ; Samples each WS2812 bit near the center of the gap between T0H and T1H.
 ; At an 8 MHz PIO clock, jmp pin samples about 500 ns after the rising edge.
 .program ws2812_rx
