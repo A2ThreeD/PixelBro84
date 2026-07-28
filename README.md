@@ -65,12 +65,15 @@ logic-level shifting and series-resistor practices described for GPIO3.
 
 ## Cyclotron cake
 
-The cake defaults to 12 red WS2812 LEDs. Its animation is derived directly from
-the captured 12-position factory sequence, so it does not use a separate timer
-that can drift out of sync. Cake LED 1 aligns with cyclotron LED 1, and each
-quarter-turn aligns with the next outer cyclotron LED. When the configured LED
-count is not 12, PixelBro84 interpolates the factory sequence evenly around the
-cake.
+The cake defaults to 12 red WS2812 LEDs. A single lit LED chases continuously
+from cake LED 1 through the end of the string, then wraps back to LED 1. The
+firmware measures the time between outer cyclotron transitions and divides each
+interval across one quarter of the cake. Every outer transition is a hard sync
+point, so the cake follows speed changes without accumulating timer drift.
+
+For a 12-LED cake, LEDs 1, 4, 7, and 10 align with outer cyclotron LEDs 1, 2,
+3, and 4. The first complete outer interval after startup calibrates the chase
+speed. Other cake lengths are divided evenly across the same four phases.
 
 Set the cake length and fixed RGB color near the top of `src/main.c`:
 

@@ -7,8 +7,9 @@ All notable project changes are documented here.
 - Added a dedicated WS2812 cyclotron cake output on GPIO28.
 - Added compile-time cake LED count and RGB configuration, defaulting to 12
   red LEDs.
-- Synchronized cake movement to the captured factory sequence, with quarter
-  points aligned to the four outer cyclotron LEDs.
+- Changed the cake animation to a continuous, single-LED circular chase.
+- Phase-locked the cake chase to measured outer cyclotron transitions, with
+  quarter points aligned to the four outer LEDs and no accumulated timer drift.
 - Added cake activity to optional USB diagnostics.
 
 ## [0.8.0] - 2026-07-25

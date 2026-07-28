@@ -1,15 +1,16 @@
 {
     "configurations": [
         {
-            "name": "Mac",
+            "name": "Pico SDK",
+            "compileCommands": "${workspaceFolder}/build-debug/compile_commands.json",
             "includePath": [
                 "${workspaceFolder}/**"
             ],
             "defines": [],
-            "compilerPath": "/usr/bin/clang",
-            "cStandard": "c17",
+            "compilerPath": "/opt/homebrew/bin/arm-none-eabi-gcc",
+            "cStandard": "c11",
             "cppStandard": "c++17",
-            "intelliSenseMode": "macos-clang-arm64"
+            "intelliSenseMode": "macos-gcc-arm"
         }
     ],
     "version": 4

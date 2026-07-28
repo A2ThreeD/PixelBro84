@@ -11,6 +11,7 @@ include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 project(PixelBro84 C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(ENABLE_USB_DIAGNOSTICS "Enable USB CDC frame diagnostics" OFF)
 
 pico_sdk_init()

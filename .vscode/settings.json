@@ -1,0 +1,14 @@
+{
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build-debug/compile_commands.json",
+    "C_Cpp.default.compilerPath": "/opt/homebrew/bin/arm-none-eabi-gcc",
+    "cmake.configureEnvironment": {
+        "PICO_SDK_PATH": "/Users/morrisaaron/pico/pico-sdk",
+        "PATH": "/opt/homebrew/bin:${env:PATH}"
+    },
+    "cmake.configureSettings": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "PICO_BOARD": "waveshare_rp2040_zero"
+    },
+    "cmake.buildDirectory": "${workspaceFolder}/build-debug",
+    "cmake.configureOnOpen": true
+}

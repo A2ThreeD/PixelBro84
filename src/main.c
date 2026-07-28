@@ -15,7 +15,7 @@
 #  if __has_include(<hardware/clocks.h>)
 #    include <hardware/clocks.h>
 #  else
-#    include <stdbool.h>
+#    include <stdbool.h>gp
 #    include <stdint.h>
 extern bool set_sys_clock_khz(uint32_t sys_clock_khz, bool required);
 extern uint32_t clock_get_hz(uint32_t clk);
@@ -51,11 +51,11 @@ bi_decl(bi_program_version_string(PROJECT_VERSION_STRING));
 bi_decl(bi_program_description(PROJECT_CHANGE_SUMMARY));
 
 // Waveshare RP2040-Zero pins. Change these if your wiring uses other GPIOs.
-#define WS2812_INPUT_PIN  2u
+#define WS2812_INPUT_PIN  29u
 #define WS2812_OUTPUT_PIN 3u
-#define CAKE_OUTPUT_PIN   28u
+#define CAKE_OUTPUT_PIN   27u
 #define LID_SENSE_PIN     4u
-#define LID_OUTPUT_PIN    29u
+#define LID_OUTPUT_PIN    28u
 
 // Set true to permanently force bypass regardless of the saved setting.
 #define LID_DETECTION_BYPASS false

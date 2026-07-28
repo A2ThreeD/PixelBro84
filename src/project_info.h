@@ -39,6 +39,6 @@
 // License and release summary reported by the Pico binary metadata.
 #define PROJECT_LICENSE "PolyForm-Noncommercial-1.0.0"
 #define PROJECT_CHANGE_SUMMARY \
-    "Added synchronized, configurable cyclotron cake output on GPIO28"
+    "Added a continuous phase-locked cyclotron cake chase on GPIO28"
 
 #endif
