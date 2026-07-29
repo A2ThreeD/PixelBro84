@@ -9,6 +9,7 @@
  */
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 
 #if defined(__has_include)
@@ -38,6 +39,7 @@ static const uint32_t clk_sys = 1u;
 #include "pico/stdlib.h"
 #include "pico/util/queue.h"
 #include "project_info.h"
+#include "user_config.h"
 #include "ws2812_rx.pio.h"
 #include "ws2812_tx.pio.h"
 
@@ -60,13 +62,6 @@ bi_decl(bi_program_description(PROJECT_CHANGE_SUMMARY));
 // Set true to permanently force bypass regardless of the saved setting.
 #define LID_DETECTION_BYPASS false
 
-// Cyclotron cake configuration. The cake color is independent of the
-// BOOT-selected outer cyclotron color.
-#define CAKE_LED_COUNT   12u
-#define CAKE_COLOR_RED   255u
-#define CAKE_COLOR_GREEN 0u
-#define CAKE_COLOR_BLUE  0u
-
 // WS2812 timing, frame dimensions, and input polling intervals.
 #define WS2812_BIT_RATE 800000.0f
 #define WS2812_RX_CLOCK 8000000.0f
@@ -77,18 +72,19 @@ bi_decl(bi_program_description(PROJECT_CHANGE_SUMMARY));
 #define HASBRO_INPUT_PIXELS 12u
 #define OUTPUT_LED_COUNT 4u
 #define INPUTS_PER_OUTPUT 3u
-#define CAKE_PHASE_ORIGIN_INPUT_INDEX 2u
 #define BUTTON_POLL_MS 10u
 #define BUTTON_DEBOUNCE_MS 30u
 #define BUTTON_LONG_PRESS_MS 2000u
 #define LID_POLL_MS 5u
 #define LID_DEBOUNCE_MS 20u
+#define CAKE_REFRESH_MS 5u
 #define COLOR_SAVE_DELAY_MS 1000u
 #define CONFIG_FLASH_ON_MS 150u
 #define CONFIG_FLASH_OFF_MS 120u
 
 // The final flash sector is used as a wear-leveled settings journal.
 #define COLOR_SETTINGS_MAGIC 0x434f4c52u
+#define USER_SETTINGS_MAGIC 0x50424346u
 #define COLOR_SETTINGS_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 #define COLOR_SETTINGS_SLOTS (FLASH_SECTOR_SIZE / FLASH_PAGE_SIZE)
 
@@ -111,16 +107,27 @@ typedef struct {
     uint8_t bypass_inverse;
     uint32_t checksum;
     uint8_t padding[FLASH_PAGE_SIZE - 16];
-} color_settings_record_t;
+} legacy_settings_record_t;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t sequence;
+    user_config_t config;
+    uint32_t checksum;
+    uint8_t padding[
+        FLASH_PAGE_SIZE - 12 - sizeof(user_config_t)];
+} user_settings_record_t;
 
 typedef struct {
     uint32_t flash_offset;
     bool erase_sector;
-    color_settings_record_t record;
-} color_flash_write_t;
+    user_settings_record_t record;
+} settings_flash_write_t;
 
-_Static_assert(sizeof(color_settings_record_t) == FLASH_PAGE_SIZE,
-               "Color setting must occupy exactly one flash page");
+_Static_assert(sizeof(legacy_settings_record_t) == FLASH_PAGE_SIZE,
+               "Legacy setting must occupy exactly one flash page");
+_Static_assert(sizeof(user_settings_record_t) == FLASH_PAGE_SIZE,
+               "User setting must occupy exactly one flash page");
 
 static const output_color_t output_colors[] = {
     {255, 0, 0, "Red"},
@@ -132,38 +139,75 @@ static const output_color_t output_colors[] = {
 
 #define OUTPUT_COLOR_COUNT (sizeof(output_colors) / sizeof(output_colors[0]))
 
-static const output_color_t cake_color = {
-    CAKE_COLOR_RED,
-    CAKE_COLOR_GREEN,
-    CAKE_COLOR_BLUE,
-    "Configured RGB",
-};
-
-_Static_assert(CAKE_LED_COUNT > 0, "The cyclotron cake needs at least one LED");
-
 // A captured source frame is also the unit passed to optional diagnostics.
 typedef struct {
     uint32_t number;
     uint32_t pixels[MAX_FRAME_PIXELS];
     uint16_t pixel_count;
+    uint16_t cake_led_index;
     uint8_t color_index;
+    uint8_t cake_brightness;
     uint8_t lid_state;
     bool truncated;
 } diagnostic_frame_t;
 
+typedef struct {
+    absolute_time_t phase_started_at;
+    absolute_time_t tx_ready_at;
+    uint32_t phase_duration_us[OUTPUT_LED_COUNT];
+    uint32_t fallback_duration_us;
+    uint16_t output_led_index;
+    uint8_t current_phase;
+    uint8_t valid_duration_mask;
+    uint8_t brightness;
+    uint8_t output_brightness;
+    bool initialized;
+    bool phase_start_known;
+    bool output_valid;
+} cake_chase_state_t;
+
+#define CONFIG_PROTOCOL_VERSION 1u
+#define CONFIG_COMMAND_MAX 512u
+#define CONFIG_MESSAGE_MAX 512u
+#define CONFIG_QUEUE_DEPTH 4u
+
+typedef enum {
+    CONFIG_REQUEST_GET,
+    CONFIG_REQUEST_SET,
+    CONFIG_REQUEST_TEST,
+} config_request_kind_t;
+
+typedef struct {
+    config_request_kind_t kind;
+    user_config_t config;
+    uint16_t test_led_index;
+    uint16_t test_duration_ms;
+    uint8_t test_red;
+    uint8_t test_green;
+    uint8_t test_blue;
+} config_request_t;
+
+typedef struct {
+    char text[CONFIG_MESSAGE_MAX];
+} config_response_t;
+
 // State shared by frame capture, settings persistence, and the second core.
 static diagnostic_frame_t capture_frame;
+static cake_chase_state_t cake_chase;
+static queue_t config_request_queue;
+static queue_t config_response_queue;
+static absolute_time_t cake_test_until;
+static bool cake_test_active;
 #if ENABLE_USB_DIAGNOSTICS
 static queue_t diagnostic_queue;
 static diagnostic_frame_t serial_frame;
 static diagnostic_frame_t previous_serial_frame;
 static bool previous_serial_frame_valid;
 #endif
-static uint8_t selected_color_index;
-static bool lid_bypass_enabled;
-static uint32_t color_settings_sequence;
-static uint color_settings_next_slot;
-static color_flash_write_t color_flash_write;
+static user_config_t user_config;
+static uint32_t settings_sequence;
+static uint settings_next_slot;
+static settings_flash_write_t settings_flash_write;
 static PIO rx_wake_pio;
 static uint rx_wake_sm;
 static repeating_timer_t idle_wake_timer;
@@ -209,14 +253,14 @@ static void sleep_until_input_or_timer(PIO pio, uint sm) {
 // Lid control uses an open-drain-style output: drive low when active and
 // switch to a high-impedance input when inactive.
 static void set_lid_output(bool pull_low) {
-    // The output latch always stays low. Direction controls whether GPIO29
+    // The output latch always stays low. Direction controls whether the pin
     // actively sinks the line or presents a high-impedance input.
     gpio_put(LID_OUTPUT_PIN, false);
     gpio_set_dir(LID_OUTPUT_PIN, pull_low ? GPIO_OUT : GPIO_IN);
 }
 
 static bool lid_bypass_active(void) {
-    return LID_DETECTION_BYPASS || lid_bypass_enabled;
+    return LID_DETECTION_BYPASS || user_config.lid_bypass != 0;
 }
 
 static void lid_switch_init(void) {
@@ -263,8 +307,8 @@ static bool read_bootsel_pressed(void) {
     return pressed;
 }
 
-// Settings validation accepts the previous color-only record format as well
-// as the current format containing the lid-bypass preference.
+// Settings validation accepts the previous color-only journal format so an
+// upgrade preserves the user's existing outer color and lid-bypass choice.
 static uint32_t legacy_color_settings_checksum(uint32_t sequence,
                                                uint8_t color_index) {
     return COLOR_SETTINGS_MAGIC ^ sequence ^ color_index ^ 0xa5c35a3cu;
@@ -277,8 +321,8 @@ static uint32_t color_settings_checksum(uint32_t sequence,
            ((uint32_t)bypass_enabled << 24) ^ 0x19b40000u;
 }
 
-static bool color_settings_record_valid(const color_settings_record_t *record,
-                                        bool *legacy) {
+static bool legacy_settings_record_valid(
+    const legacy_settings_record_t *record, bool *color_only) {
     const bool common_valid =
         record->magic == COLOR_SETTINGS_MAGIC &&
         record->color_index < OUTPUT_COLOR_COUNT &&
@@ -291,11 +335,11 @@ static bool color_settings_record_valid(const color_settings_record_t *record,
         record->bypass_inverse == 0xffu &&
         record->checksum == legacy_color_settings_checksum(
                                 record->sequence, record->color_index)) {
-        *legacy = true;
+        *color_only = true;
         return true;
     }
 
-    *legacy = false;
+    *color_only = false;
     return record->magic == COLOR_SETTINGS_MAGIC &&
            record->bypass_enabled <= 1u &&
            record->bypass_inverse == (uint8_t)~record->bypass_enabled &&
@@ -304,34 +348,78 @@ static bool color_settings_record_valid(const color_settings_record_t *record,
                                        record->bypass_enabled != 0);
 }
 
+static uint32_t user_settings_checksum(uint32_t sequence,
+                                       const user_config_t *config) {
+    uint32_t hash = 2166136261u;
+    const uint8_t *sequence_bytes = (const uint8_t *)&sequence;
+    const uint8_t *config_bytes = (const uint8_t *)config;
+
+    for (size_t index = 0; index < sizeof(sequence); ++index) {
+        hash = (hash ^ sequence_bytes[index]) * 16777619u;
+    }
+    for (size_t index = 0; index < sizeof(*config); ++index) {
+        hash = (hash ^ config_bytes[index]) * 16777619u;
+    }
+    return hash ^ USER_SETTINGS_MAGIC;
+}
+
+static bool user_settings_record_valid(
+    const user_settings_record_t *record) {
+    char error[1];
+    return record->magic == USER_SETTINGS_MAGIC &&
+           user_config_validate(&record->config, OUTPUT_COLOR_COUNT,
+                                error, sizeof(error)) &&
+           record->checksum ==
+               user_settings_checksum(record->sequence, &record->config);
+}
+
 // Scan the flash journal for the newest valid record and the next free page.
-static void load_color_setting(void) {
-    const color_settings_record_t *records =
-        (const color_settings_record_t *)(XIP_BASE + COLOR_SETTINGS_OFFSET);
+static void load_user_setting(void) {
+    const uint8_t *records =
+        (const uint8_t *)(XIP_BASE + COLOR_SETTINGS_OFFSET);
     bool found = false;
-    color_settings_next_slot = COLOR_SETTINGS_SLOTS;
+    user_config_set_defaults(&user_config);
+    settings_next_slot = COLOR_SETTINGS_SLOTS;
 
     for (uint slot = 0; slot < COLOR_SETTINGS_SLOTS; ++slot) {
-        const color_settings_record_t *record = &records[slot];
-        bool legacy = false;
-        if (record->magic == 0xffffffffu &&
-            color_settings_next_slot == COLOR_SETTINGS_SLOTS) {
-            color_settings_next_slot = slot;
+        const uint8_t *page = records + slot * FLASH_PAGE_SIZE;
+        const uint32_t magic = *(const uint32_t *)page;
+        if (magic == 0xffffffffu &&
+            settings_next_slot == COLOR_SETTINGS_SLOTS) {
+            settings_next_slot = slot;
         }
-        if (color_settings_record_valid(record, &legacy) &&
-            (!found || record->sequence >= color_settings_sequence)) {
-            selected_color_index = record->color_index;
-            lid_bypass_enabled = legacy ? false : record->bypass_enabled != 0;
-            color_settings_sequence = record->sequence;
-            found = true;
+
+        if (magic == USER_SETTINGS_MAGIC) {
+            const user_settings_record_t *record =
+                (const user_settings_record_t *)page;
+            if (user_settings_record_valid(record) &&
+                (!found || record->sequence >= settings_sequence)) {
+                user_config = record->config;
+                settings_sequence = record->sequence;
+                found = true;
+            }
+        } else if (magic == COLOR_SETTINGS_MAGIC) {
+            const legacy_settings_record_t *record =
+                (const legacy_settings_record_t *)page;
+            bool color_only = false;
+            if (legacy_settings_record_valid(record, &color_only) &&
+                (!found || record->sequence >= settings_sequence)) {
+                user_config_set_defaults(&user_config);
+                user_config.outer_color_index = record->color_index;
+                user_config.lid_bypass =
+                    color_only ? 0 : record->bypass_enabled;
+                settings_sequence = record->sequence;
+                found = true;
+            }
         }
     }
 }
 
 // Flash erase/program code must execute from RAM because XIP is unavailable
 // while the onboard flash is being modified.
-static void __not_in_flash_func(write_color_setting_flash)(void *parameter) {
-    const color_flash_write_t *write = (const color_flash_write_t *)parameter;
+static void __not_in_flash_func(write_user_setting_flash)(void *parameter) {
+    const settings_flash_write_t *write =
+        (const settings_flash_write_t *)parameter;
     if (write->erase_sector) {
         flash_range_erase(COLOR_SETTINGS_OFFSET, FLASH_SECTOR_SIZE);
     }
@@ -340,37 +428,30 @@ static void __not_in_flash_func(write_color_setting_flash)(void *parameter) {
                         FLASH_PAGE_SIZE);
 }
 
-// Append a settings record, erasing and restarting the journal when full.
-static bool save_color_setting(void) {
-    const bool erase_sector =
-        color_settings_next_slot >= COLOR_SETTINGS_SLOTS;
-    const uint slot = erase_sector ? 0 : color_settings_next_slot;
+// Append a validated settings record, restarting the journal when it is full.
+static bool save_user_setting(void) {
+    const bool erase_sector = settings_next_slot >= COLOR_SETTINGS_SLOTS;
+    const uint slot = erase_sector ? 0 : settings_next_slot;
 
-    memset(&color_flash_write.record, 0xff,
-           sizeof(color_flash_write.record));
-    color_flash_write.erase_sector = erase_sector;
-    color_flash_write.flash_offset =
+    memset(&settings_flash_write.record, 0xff,
+           sizeof(settings_flash_write.record));
+    settings_flash_write.erase_sector = erase_sector;
+    settings_flash_write.flash_offset =
         COLOR_SETTINGS_OFFSET + slot * FLASH_PAGE_SIZE;
-    color_flash_write.record.magic = COLOR_SETTINGS_MAGIC;
-    color_flash_write.record.sequence = ++color_settings_sequence;
-    color_flash_write.record.color_index = selected_color_index;
-    color_flash_write.record.color_inverse =
-        (uint8_t)~selected_color_index;
-    color_flash_write.record.bypass_enabled = lid_bypass_enabled ? 1u : 0u;
-    color_flash_write.record.bypass_inverse =
-        (uint8_t)~color_flash_write.record.bypass_enabled;
-    color_flash_write.record.checksum = color_settings_checksum(
-        color_flash_write.record.sequence, selected_color_index,
-        lid_bypass_enabled);
+    settings_flash_write.record.magic = USER_SETTINGS_MAGIC;
+    settings_flash_write.record.sequence = ++settings_sequence;
+    settings_flash_write.record.config = user_config;
+    settings_flash_write.record.checksum = user_settings_checksum(
+        settings_flash_write.record.sequence, &user_config);
 
-    const int result = flash_safe_execute(write_color_setting_flash,
-                                          &color_flash_write, 1000u);
+    const int result = flash_safe_execute(write_user_setting_flash,
+                                          &settings_flash_write, 1000u);
     if (result != PICO_OK) {
-        --color_settings_sequence;
+        --settings_sequence;
         return false;
     }
 
-    color_settings_next_slot = slot + 1;
+    settings_next_slot = slot + 1;
     return true;
 }
 
@@ -419,7 +500,8 @@ static void restart_ws2812_rx(PIO pio, uint sm, uint offset) {
 }
 
 // Configure a PIO state machine to transmit 24-bit GRB pixels at 800 kHz.
-static void ws2812_tx_init(PIO pio, uint sm, uint offset, uint pin) {
+static void ws2812_tx_init(PIO pio, uint sm, uint offset, uint pin,
+                           uint32_t bit_rate_hz) {
     pio_gpio_init(pio, pin);
     pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
 
@@ -429,9 +511,19 @@ static void ws2812_tx_init(PIO pio, uint sm, uint offset, uint pin) {
     sm_config_set_fifo_join(&config, PIO_FIFO_JOIN_TX);
     sm_config_set_clkdiv(&config,
                          (float)clock_get_hz(clk_sys) /
-                             (WS2812_BIT_RATE * 10.0f));
+                             ((float)bit_rate_hz * 10.0f));
 
     pio_sm_init(pio, sm, offset, &config);
+    pio_sm_set_enabled(pio, sm, true);
+}
+
+static void ws2812_tx_set_bit_rate(PIO pio, uint sm,
+                                   uint32_t bit_rate_hz) {
+    pio_sm_set_enabled(pio, sm, false);
+    pio_sm_set_clkdiv(
+        pio, sm,
+        (float)clock_get_hz(clk_sys) / ((float)bit_rate_hz * 10.0f));
+    pio_sm_clkdiv_restart(pio, sm);
     pio_sm_set_enabled(pio, sm, true);
 }
 
@@ -464,27 +556,113 @@ static uint8_t mapped_brightness(const diagnostic_frame_t *frame,
     return input_brightness(frame->pixels[center_input_index]);
 }
 
-static uint8_t cake_brightness(const diagnostic_frame_t *frame,
-                               uint cake_index) {
-    // Rotate the 12-position factory phase so cake LED 1 starts at input 3,
-    // the center of cyclotron lens 1. At every quarter of a divisible cake
-    // length, the phase lands on inputs 6, 9, and 12 for lenses 2, 3, and 4.
-    // Linear interpolation keeps other cake lengths evenly spaced.
-    const uint64_t phase_numerator =
-        (uint64_t)cake_index * HASBRO_INPUT_PIXELS;
-    const uint source_step = (uint)(phase_numerator / CAKE_LED_COUNT);
-    const uint64_t remainder = phase_numerator % CAKE_LED_COUNT;
-    const uint source_index =
-        (CAKE_PHASE_ORIGIN_INPUT_INDEX + source_step) % HASBRO_INPUT_PIXELS;
-    const uint next_source_index = (source_index + 1u) % HASBRO_INPUT_PIXELS;
-    const uint8_t brightness = input_brightness(frame->pixels[source_index]);
-    const uint8_t next_brightness =
-        input_brightness(frame->pixels[next_source_index]);
+static uint8_t brightest_cyclotron_phase(
+    const diagnostic_frame_t *frame, uint8_t retained_phase,
+    uint8_t *brightness) {
+    uint8_t brightest_phase = retained_phase;
+    uint8_t brightest = mapped_brightness(frame, retained_phase);
 
-    return (uint8_t)(
-        ((uint64_t)brightness * (CAKE_LED_COUNT - remainder) +
-         (uint64_t)next_brightness * remainder + CAKE_LED_COUNT / 2u) /
-        CAKE_LED_COUNT);
+    // Retain the current phase on equal brightness to prevent an overlap
+    // frame from bouncing the chase backward and forward.
+    for (uint8_t phase = 0; phase < OUTPUT_LED_COUNT; ++phase) {
+        const uint8_t candidate = mapped_brightness(frame, phase);
+        if (candidate > brightest) {
+            brightest = candidate;
+            brightest_phase = phase;
+        }
+    }
+
+    *brightness = brightest;
+    return brightest_phase;
+}
+
+static uint16_t cake_chase_led_index(absolute_time_t now) {
+    const uint8_t current_phase = cake_chase.current_phase;
+    uint32_t duration_us = cake_chase.fallback_duration_us;
+    if ((cake_chase.valid_duration_mask & (1u << current_phase)) != 0) {
+        duration_us = cake_chase.phase_duration_us[current_phase];
+    }
+
+    uint64_t elapsed_us = 0;
+    if (duration_us > 0) {
+        const int64_t measured_us =
+            absolute_time_diff_us(cake_chase.phase_started_at, now);
+        if (measured_us > 0) {
+            elapsed_us = (uint64_t)measured_us;
+        }
+        if (elapsed_us >= duration_us) {
+            elapsed_us = duration_us - 1u;
+        }
+    }
+
+    // Each outer phase owns one quarter of the cake. The next outer
+    // transition hard-aligns the following quarter and eliminates drift.
+    const uint64_t phase_progress =
+        (uint64_t)current_phase * duration_us + elapsed_us;
+    const uint64_t phase_scale =
+        (uint64_t)OUTPUT_LED_COUNT * duration_us;
+    return duration_us == 0
+               ? (uint16_t)(((uint32_t)current_phase *
+                             user_config.cake_led_count) /
+                            OUTPUT_LED_COUNT)
+               : (uint16_t)((phase_progress *
+                             user_config.cake_led_count) / phase_scale);
+}
+
+static uint16_t cake_physical_led_index(uint16_t logical_index) {
+    const uint16_t count = user_config.cake_led_count;
+    if (user_config.cake_reverse != 0) {
+        return (uint16_t)(
+            (user_config.cake_start_offset + count - logical_index) % count);
+    }
+    return (uint16_t)(
+        (user_config.cake_start_offset + logical_index) % count);
+}
+
+static void update_cake_chase(diagnostic_frame_t *frame,
+                              absolute_time_t now) {
+    uint8_t brightness = 0;
+    const uint8_t retained_phase =
+        cake_chase.initialized ? cake_chase.current_phase : 0;
+    const uint8_t phase =
+        brightest_cyclotron_phase(frame, retained_phase, &brightness);
+
+    if (!cake_chase.initialized) {
+        if (brightness == 0) {
+            frame->cake_led_index = 0;
+            frame->cake_brightness = 0;
+            return;
+        }
+
+        cake_chase.initialized = true;
+        cake_chase.current_phase = phase;
+        cake_chase.phase_started_at = now;
+    } else if (brightness > 0 && phase != cake_chase.current_phase) {
+        const int64_t measured_us =
+            absolute_time_diff_us(cake_chase.phase_started_at, now);
+
+        // The first observed phase may have begun before startup, so discard
+        // that partial interval. Every later transition supplies full timing.
+        if (cake_chase.phase_start_known && measured_us > 0) {
+            const uint32_t duration_us =
+                measured_us > UINT32_MAX ? UINT32_MAX
+                                         : (uint32_t)measured_us;
+            cake_chase.phase_duration_us[cake_chase.current_phase] =
+                duration_us;
+            cake_chase.fallback_duration_us = duration_us;
+            cake_chase.valid_duration_mask |=
+                (uint8_t)(1u << cake_chase.current_phase);
+        }
+
+        cake_chase.phase_start_known = true;
+        cake_chase.current_phase = phase;
+        cake_chase.phase_started_at = now;
+    }
+
+    cake_chase.brightness = brightness;
+    frame->cake_led_index =
+        cake_physical_led_index(cake_chase_led_index(now));
+    frame->cake_brightness = brightness;
 }
 
 static uint32_t recolored_grb(const output_color_t *color,
@@ -492,6 +670,25 @@ static uint32_t recolored_grb(const output_color_t *color,
     return ((uint32_t)scale_channel(color->green, brightness) << 16) |
            ((uint32_t)scale_channel(color->red, brightness) << 8) |
            scale_channel(color->blue, brightness);
+}
+
+static uint32_t packed_cake_pixel(uint8_t red, uint8_t green,
+                                  uint8_t blue) {
+    if (user_config.cake_color_order == CAKE_COLOR_ORDER_RGB) {
+        return ((uint32_t)red << 16) |
+               ((uint32_t)green << 8) |
+               blue;
+    }
+    return ((uint32_t)green << 16) |
+           ((uint32_t)red << 8) |
+           blue;
+}
+
+static uint32_t recolored_cake_pixel(uint8_t brightness) {
+    return packed_cake_pixel(
+        scale_channel(user_config.cake_red, brightness),
+        scale_channel(user_config.cake_green, brightness),
+        scale_channel(user_config.cake_blue, brightness));
 }
 
 // Emit one completed source frame to the four outer cyclotron LEDs.
@@ -503,31 +700,171 @@ static void output_cyclotron_frame(PIO pio, uint sm,
 
     for (uint output_index = 0; output_index < OUTPUT_LED_COUNT; ++output_index) {
         const uint8_t brightness = mapped_brightness(frame, output_index);
-        const output_color_t *color = &output_colors[selected_color_index];
+        const output_color_t *color =
+            &output_colors[user_config.outer_color_index];
         pio_sm_put_blocking(pio, sm,
                             recolored_grb(color, brightness) << 8);
     }
 }
 
-// Emit the same animation phase to the independently colored cake LEDs.
+static void mark_cake_tx_busy(absolute_time_t started_at) {
+    const uint32_t frame_us =
+        user_config.cake_led_count *
+            (24000u / user_config.cake_bit_rate_khz) +
+        WS2812_RESET_US;
+    cake_chase.tx_ready_at = delayed_by_us(started_at, frame_us);
+}
+
+static void refresh_cake_output(PIO pio, uint sm, absolute_time_t now) {
+    if (!cake_chase.initialized || !time_reached(cake_chase.tx_ready_at)) {
+        return;
+    }
+
+    const uint16_t active_index =
+        cake_physical_led_index(cake_chase_led_index(now));
+    if (cake_chase.output_valid &&
+        active_index == cake_chase.output_led_index &&
+        cake_chase.brightness == cake_chase.output_brightness) {
+        return;
+    }
+
+    // Every frame contains exactly one nonzero pixel. Do not start another
+    // frame until the previous 12 pixels and reset-low interval have elapsed.
+    for (uint cake_index = 0;
+         cake_index < user_config.cake_led_count;
+         ++cake_index) {
+        const uint8_t brightness =
+            cake_index == active_index ? cake_chase.brightness : 0;
+        pio_sm_put_blocking(
+            pio, sm,
+            recolored_cake_pixel(brightness) << 8);
+    }
+
+    mark_cake_tx_busy(now);
+    cake_chase.output_led_index = active_index;
+    cake_chase.output_brightness = cake_chase.brightness;
+    cake_chase.output_valid = true;
+}
+
+// Emit one moving cake LED whose phase is locked to the outer cyclotron.
 static void output_cake_frame(PIO pio, uint sm,
-                              const diagnostic_frame_t *frame) {
+                              diagnostic_frame_t *frame,
+                              absolute_time_t now) {
     if (frame->pixel_count != HASBRO_INPUT_PIXELS) {
         return;
     }
 
-    for (uint cake_index = 0; cake_index < CAKE_LED_COUNT; ++cake_index) {
-        pio_sm_put_blocking(
-            pio, sm,
-            recolored_grb(&cake_color,
-                          cake_brightness(frame, cake_index)) << 8);
-    }
+    update_cake_chase(frame, now);
+    refresh_cake_output(pio, sm, now);
 }
 
 static void output_cake_off(PIO pio, uint sm) {
-    for (uint index = 0; index < CAKE_LED_COUNT; ++index) {
+    while (!time_reached(cake_chase.tx_ready_at)) {
+        tight_loop_contents();
+    }
+    const absolute_time_t now = get_absolute_time();
+    for (uint index = 0; index < user_config.cake_led_count; ++index) {
         pio_sm_put_blocking(pio, sm, 0u);
     }
+    mark_cake_tx_busy(now);
+    cake_chase.output_valid = false;
+}
+
+static void output_cake_test(PIO pio, uint sm,
+                             const config_request_t *request,
+                             absolute_time_t now) {
+    while (!time_reached(cake_chase.tx_ready_at)) {
+        tight_loop_contents();
+    }
+    now = get_absolute_time();
+
+    for (uint index = 0; index < user_config.cake_led_count; ++index) {
+        const uint32_t pixel =
+            index == request->test_led_index
+                ? packed_cake_pixel(request->test_red,
+                                    request->test_green,
+                                    request->test_blue)
+                : 0u;
+        pio_sm_put_blocking(pio, sm, pixel << 8);
+    }
+    mark_cake_tx_busy(now);
+    cake_chase.output_valid = false;
+    cake_test_active = true;
+    cake_test_until =
+        delayed_by_ms(now, request->test_duration_ms);
+}
+
+static void queue_config_response(const char *format, ...) {
+    config_response_t response;
+    va_list arguments;
+    va_start(arguments, format);
+    vsnprintf(response.text, sizeof(response.text), format, arguments);
+    va_end(arguments);
+    queue_try_add(&config_response_queue, &response);
+}
+
+static void queue_current_config(void) {
+    queue_config_response(
+        "PB84 CONFIG protocol=%u firmware=%s "
+        "cake_led_count=%u cake_led_type=%s cake_color_order=%s "
+        "cake_bit_rate_khz=%u cake_red=%u cake_green=%u cake_blue=%u "
+        "cake_reverse=%s cake_start_offset=%u outer_color_index=%u "
+        "lid_bypass=%s",
+        CONFIG_PROTOCOL_VERSION, PROJECT_VERSION_STRING,
+        user_config.cake_led_count,
+        cake_led_type_name(user_config.cake_led_type),
+        cake_color_order_name(user_config.cake_color_order),
+        user_config.cake_bit_rate_khz,
+        user_config.cake_red, user_config.cake_green,
+        user_config.cake_blue,
+        user_config.cake_reverse ? "true" : "false",
+        user_config.cake_start_offset,
+        user_config.outer_color_index,
+        user_config.lid_bypass ? "true" : "false");
+}
+
+static void process_config_request(PIO pio, uint cake_sm,
+                                   const config_request_t *request) {
+    if (request->kind == CONFIG_REQUEST_GET) {
+        queue_current_config();
+        return;
+    }
+
+    if (request->kind == CONFIG_REQUEST_TEST) {
+        if (request->test_led_index >= user_config.cake_led_count) {
+            queue_config_response(
+                "PB84 ERROR test LED must be between 1 and %u",
+                user_config.cake_led_count);
+            return;
+        }
+        output_cake_test(pio, cake_sm, request, get_absolute_time());
+        queue_config_response("PB84 OK tested_led=%u",
+                              request->test_led_index + 1);
+        return;
+    }
+
+    const user_config_t previous = user_config;
+    user_config = request->config;
+    if (!save_user_setting()) {
+        user_config = previous;
+        queue_config_response("PB84 ERROR unable to save configuration");
+        return;
+    }
+
+    // Latch an all-off frame using the old frame length before applying the
+    // new timing and count, then restart the chase calibration.
+    user_config = previous;
+    output_cake_off(pio, cake_sm);
+    while (!time_reached(cake_chase.tx_ready_at)) {
+        tight_loop_contents();
+    }
+    user_config = request->config;
+    memset(&cake_chase, 0, sizeof(cake_chase));
+    ws2812_tx_set_bit_rate(
+        pio, cake_sm, (uint32_t)user_config.cake_bit_rate_khz * 1000u);
+    set_lid_output(lid_bypass_active());
+    cake_test_active = false;
+    queue_config_response("PB84 OK saved=true");
 }
 
 static void output_all_red(PIO pio, uint sm, bool on) {
@@ -550,11 +887,11 @@ static void print_frame(const diagnostic_frame_t *frame) {
         printf("Frame %lu: 12 inputs -> 4 cyclotron LEDs + %u cake LEDs, "
                "color %s, cake RGB(%u,%u,%u), lid %s%s\n",
                (unsigned long)frame->number,
-               CAKE_LED_COUNT,
+               user_config.cake_led_count,
                color->name,
-               cake_color.red,
-               cake_color.green,
-               cake_color.blue,
+               user_config.cake_red,
+               user_config.cake_green,
+               user_config.cake_blue,
                lid_status,
                frame->truncated ? " (diagnostic buffer full)" : "");
         for (uint output_index = 0; output_index < OUTPUT_LED_COUNT;
@@ -565,14 +902,11 @@ static void print_frame(const diagnostic_frame_t *frame) {
                        output_index + 1, brightness, color->name);
             }
         }
-        for (uint cake_index = 0; cake_index < CAKE_LED_COUNT; ++cake_index) {
-            const uint8_t brightness =
-                cake_brightness(frame, cake_index);
-            if (brightness > 0) {
-                printf("  Cake LED %u: brightness %u -> RGB(%u,%u,%u)\n",
-                       cake_index + 1, brightness,
-                       cake_color.red, cake_color.green, cake_color.blue);
-            }
+        if (frame->cake_brightness > 0) {
+            printf("  Cake LED %u: brightness %u -> RGB(%u,%u,%u)\n",
+                   frame->cake_led_index + 1, frame->cake_brightness,
+                   user_config.cake_red, user_config.cake_green,
+                   user_config.cake_blue);
         }
         fflush(stdout);
         return;
@@ -609,6 +943,8 @@ static bool frames_match(const diagnostic_frame_t *a,
                          const diagnostic_frame_t *b) {
     return a->pixel_count == b->pixel_count &&
            a->color_index == b->color_index &&
+           a->cake_led_index == b->cake_led_index &&
+           a->cake_brightness == b->cake_brightness &&
            a->lid_state == b->lid_state &&
            a->truncated == b->truncated &&
            memcmp(a->pixels, b->pixels,
@@ -616,40 +952,155 @@ static bool frames_match(const diagnostic_frame_t *a,
 }
 #endif
 
+static void send_config_line(const char *line) {
+    printf("%s\r\n", line);
+    fflush(stdout);
+}
+
+static void submit_config_request(const config_request_t *request) {
+    if (!queue_try_add(&config_request_queue, request)) {
+        send_config_line("PB84 ERROR device is busy");
+    }
+}
+
+static void handle_config_command(char *line) {
+    while (*line == ' ' || *line == '\t') {
+        ++line;
+    }
+
+    if (strcmp(line, "PB84 HELLO") == 0) {
+        printf("PB84 HELLO protocol=%u product=%s firmware=%s\r\n",
+               CONFIG_PROTOCOL_VERSION, PROJECT_NAME,
+               PROJECT_VERSION_STRING);
+        fflush(stdout);
+        return;
+    }
+
+    if (strcmp(line, "PB84 GET") == 0) {
+        const config_request_t request = {
+            .kind = CONFIG_REQUEST_GET,
+        };
+        submit_config_request(&request);
+        return;
+    }
+
+    if (strncmp(line, "PB84 SET ", 9) == 0) {
+        config_request_t request = {
+            .kind = CONFIG_REQUEST_SET,
+        };
+        char error[96];
+        const user_config_t base = user_config;
+        if (!user_config_parse_update(
+                line + 9, &base, OUTPUT_COLOR_COUNT,
+                &request.config, error, sizeof(error))) {
+            printf("PB84 ERROR %s\r\n", error);
+            fflush(stdout);
+            return;
+        }
+        submit_config_request(&request);
+        return;
+    }
+
+    if (strncmp(line, "PB84 TEST ", 10) == 0) {
+        unsigned int led = 0;
+        unsigned int red = 0;
+        unsigned int green = 0;
+        unsigned int blue = 0;
+        unsigned int duration_ms = 0;
+        const int matched = sscanf(
+            line + 10,
+            "led=%u red=%u green=%u blue=%u duration_ms=%u",
+            &led, &red, &green, &blue, &duration_ms);
+        if (matched != 5 || led == 0 || led > CAKE_LED_COUNT_MAX ||
+            red > 255 || green > 255 || blue > 255 ||
+            duration_ms < 100 || duration_ms > 10000) {
+            send_config_line(
+                "PB84 ERROR invalid TEST values");
+            return;
+        }
+
+        const config_request_t request = {
+            .kind = CONFIG_REQUEST_TEST,
+            .test_led_index = (uint16_t)(led - 1),
+            .test_duration_ms = (uint16_t)duration_ms,
+            .test_red = (uint8_t)red,
+            .test_green = (uint8_t)green,
+            .test_blue = (uint8_t)blue,
+        };
+        submit_config_request(&request);
+        return;
+    }
+
+    send_config_line("PB84 ERROR unsupported command");
+}
+
+static void config_usb_task(void) {
+    static char command[CONFIG_COMMAND_MAX];
+    static size_t command_length;
+
+    int character = getchar_timeout_us(0);
+    while (character != PICO_ERROR_TIMEOUT) {
+        if (character == '\n') {
+            command[command_length] = '\0';
+            if (command_length > 0 &&
+                command[command_length - 1] == '\r') {
+                command[--command_length] = '\0';
+            }
+            if (command_length > 0) {
+                handle_config_command(command);
+            }
+            command_length = 0;
+        } else if (command_length + 1 < sizeof(command)) {
+            command[command_length++] = (char)character;
+        } else {
+            command_length = 0;
+            send_config_line("PB84 ERROR command is too long");
+        }
+        character = getchar_timeout_us(0);
+    }
+
+    config_response_t response;
+    while (queue_try_remove(&config_response_queue, &response)) {
+        send_config_line(response.text);
+    }
+}
+
 // Core 1 participates in safe flash operations and, when enabled, drains the
 // diagnostic queue so serial output never delays time-sensitive frame capture.
 static void diagnostics_core(void) {
     flash_safe_execute_core_init();
     multicore_fifo_push_blocking(1u);
 
-#if ENABLE_USB_DIAGNOSTICS
     while (true) {
-        queue_remove_blocking(&diagnostic_queue, &serial_frame);
+        config_usb_task();
 
+#if ENABLE_USB_DIAGNOSTICS
+        if (queue_try_remove(&diagnostic_queue, &serial_frame)) {
         if (previous_serial_frame_valid &&
             frames_match(&serial_frame, &previous_serial_frame)) {
-            continue;
+                sleep_ms(1);
+                continue;
         }
 
         print_frame(&serial_frame);
         previous_serial_frame = serial_frame;
         previous_serial_frame_valid = true;
-    }
-#else
-    while (true) {
-        __wfi();
-    }
+        }
 #endif
+        sleep_ms(1);
+    }
 }
 
 int main(void) {
     // Restore saved preferences and bring up GPIO, multicore, and PIO hardware.
     set_sys_clock_khz(SYSTEM_CLOCK_KHZ, true);
-#if ENABLE_USB_DIAGNOSTICS
     stdio_init_all();
-#endif
-    load_color_setting();
+    load_user_setting();
     lid_switch_init();
+    queue_init(&config_request_queue, sizeof(config_request_t),
+               CONFIG_QUEUE_DEPTH);
+    queue_init(&config_response_queue, sizeof(config_response_t),
+               CONFIG_QUEUE_DEPTH);
 #if ENABLE_USB_DIAGNOSTICS
     queue_init(&diagnostic_queue, sizeof(diagnostic_frame_t),
                DIAGNOSTIC_QUEUE_DEPTH);
@@ -665,8 +1116,10 @@ int main(void) {
     const uint cake_tx_sm = pio_claim_unused_sm(pio, true);
 
     ws2812_rx_init(pio, rx_sm, rx_offset, WS2812_INPUT_PIN);
-    ws2812_tx_init(pio, tx_sm, tx_offset, WS2812_OUTPUT_PIN);
-    ws2812_tx_init(pio, cake_tx_sm, tx_offset, CAKE_OUTPUT_PIN);
+    ws2812_tx_init(pio, tx_sm, tx_offset, WS2812_OUTPUT_PIN,
+                   (uint32_t)WS2812_BIT_RATE);
+    ws2812_tx_init(pio, cake_tx_sm, tx_offset, CAKE_OUTPUT_PIN,
+                   (uint32_t)user_config.cake_bit_rate_khz * 1000u);
     wait_for_ws2812_reset(WS2812_INPUT_PIN);
     restart_ws2812_rx(pio, rx_sm, rx_offset);
     pio_rx_wake_init(pio, rx_sm);
@@ -679,9 +1132,10 @@ int main(void) {
            "GPIO %u (%u cake LEDs, RGB(%u,%u,%u))\n",
            PROJECT_NAME, PROJECT_VERSION_STRING,
            WS2812_INPUT_PIN, WS2812_OUTPUT_PIN,
-           output_colors[selected_color_index].name,
-           CAKE_OUTPUT_PIN, CAKE_LED_COUNT,
-           cake_color.red, cake_color.green, cake_color.blue);
+           output_colors[user_config.outer_color_index].name,
+           CAKE_OUTPUT_PIN, user_config.cake_led_count,
+           user_config.cake_red, user_config.cake_green,
+           user_config.cake_blue);
 #endif
 
     // Runtime state for frame boundaries, debounced controls, deferred flash
@@ -693,6 +1147,7 @@ int main(void) {
     absolute_time_t button_pressed_at = get_absolute_time();
     absolute_time_t next_lid_poll = get_absolute_time();
     absolute_time_t lid_changed_at = get_absolute_time();
+    absolute_time_t next_cake_refresh = get_absolute_time();
     absolute_time_t color_save_at = at_the_end_of_time;
     absolute_time_t config_flash_at = at_the_end_of_time;
     bool receiving_frame = false;
@@ -729,14 +1184,18 @@ int main(void) {
                 WS2812_RESET_US) {
             capture_frame.number = ++frame_number;
             restart_ws2812_rx(pio, rx_sm, rx_offset);
-            capture_frame.color_index = selected_color_index;
+            capture_frame.color_index = user_config.outer_color_index;
             capture_frame.lid_state = lid_bypass_active()
                                           ? LID_STATE_BYPASSED
                                           : lid_closed ? LID_STATE_CLOSED
                                                        : LID_STATE_OPEN;
             if (config_flash_phase == 0) {
+                const absolute_time_t frame_time = get_absolute_time();
                 output_cyclotron_frame(pio, tx_sm, &capture_frame);
-                output_cake_frame(pio, cake_tx_sm, &capture_frame);
+                if (!cake_test_active) {
+                    output_cake_frame(pio, cake_tx_sm, &capture_frame,
+                                      frame_time);
+                }
             }
 #if ENABLE_USB_DIAGNOSTICS
             queue_try_add(&diagnostic_queue, &capture_frame);
@@ -744,6 +1203,26 @@ int main(void) {
             capture_frame.pixel_count = 0;
             capture_frame.truncated = false;
             receiving_frame = false;
+        }
+
+        config_request_t config_request;
+        if (!receiving_frame &&
+            queue_try_remove(&config_request_queue, &config_request)) {
+            process_config_request(pio, cake_tx_sm, &config_request);
+        }
+
+        if (cake_test_active && time_reached(cake_test_until)) {
+            cake_test_active = false;
+            cake_chase.output_valid = false;
+        }
+
+        // Refresh from the measured phase clock even when the source frame is
+        // unchanged. TX readiness guarantees a reset-low latch between frames.
+        if (config_flash_phase == 0 && !cake_test_active &&
+            time_reached(next_cake_refresh)) {
+            const absolute_time_t now = get_absolute_time();
+            next_cake_refresh = delayed_by_ms(now, CAKE_REFRESH_MS);
+            refresh_cake_output(pio, cake_tx_sm, now);
         }
 
         // Debounce the lid input and mirror it through the open-drain output.
@@ -778,8 +1257,9 @@ int main(void) {
                     button_pressed_at = get_absolute_time();
                     button_long_press_handled = false;
                 } else if (!button_long_press_handled) {
-                    selected_color_index =
-                        (selected_color_index + 1) % OUTPUT_COLOR_COUNT;
+                    user_config.outer_color_index =
+                        (user_config.outer_color_index + 1) %
+                        OUTPUT_COLOR_COUNT;
                     color_save_at = delayed_by_ms(get_absolute_time(),
                                                   COLOR_SAVE_DELAY_MS);
                     color_save_pending = true;
@@ -791,7 +1271,8 @@ int main(void) {
                                       get_absolute_time()) >=
                     BUTTON_LONG_PRESS_MS * 1000u) {
                 button_long_press_handled = true;
-                lid_bypass_enabled = !lid_bypass_enabled;
+                user_config.lid_bypass =
+                    user_config.lid_bypass == 0 ? 1 : 0;
 
                 if (lid_bypass_active()) {
                     set_lid_output(true);
@@ -837,7 +1318,7 @@ int main(void) {
         // Coalesce rapid setting changes before committing them to flash.
         if (color_save_pending && !button_pressed &&
             time_reached(color_save_at)) {
-            if (save_color_setting()) {
+            if (save_user_setting()) {
                 color_save_pending = false;
             } else {
                 color_save_at = delayed_by_ms(get_absolute_time(),

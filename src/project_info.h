@@ -2,8 +2,8 @@
  * Project:    PixelBro84
  * Programmer: Aaron Morris
  * Company:    A2ThreeD
- * Version:    0.9.0
- * Date:       2026-07-26
+ * Version:    1.0.0
+ * Date:       2026-07-29
  *
  * Copyright (c) 2026 Aaron Morris / A2ThreeD.
  *
@@ -30,15 +30,15 @@
 #define PROJECT_COMPANY "A2ThreeD"
 
 // Keep the numeric components and display string synchronized for releases.
-#define PROJECT_VERSION_MAJOR 0
-#define PROJECT_VERSION_MINOR 9
+#define PROJECT_VERSION_MAJOR 1
+#define PROJECT_VERSION_MINOR 0
 #define PROJECT_VERSION_PATCH 0
-#define PROJECT_VERSION_STRING "0.9.0"
-#define PROJECT_RELEASE_DATE "2026-07-26"
+#define PROJECT_VERSION_STRING "1.0.0"
+#define PROJECT_RELEASE_DATE "2026-07-29"
 
 // License and release summary reported by the Pico binary metadata.
 #define PROJECT_LICENSE "PolyForm-Noncommercial-1.0.0"
 #define PROJECT_CHANGE_SUMMARY \
-    "Added a continuous phase-locked cyclotron cake chase on GPIO28"
+    "Added browser-based USB configuration and runtime cake settings"
 
 #endif

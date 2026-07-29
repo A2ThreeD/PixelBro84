@@ -2,9 +2,21 @@
 
 All notable project changes are documented here.
 
+## [1.0.0] - 2026-07-29
+
+- Added an always-available USB CDC configuration protocol for the browser
+  configurator.
+- Made cake LED count, controller type, color order, bitrate, RGB color,
+  direction, and start offset configurable at runtime.
+- Added remote configuration of the outer color and lid bypass.
+- Added individual cake LED testing through the configuration protocol.
+- Generalized the wear-leveled flash journal while retaining compatibility
+  with existing color and lid-bypass records.
+- Added the standalone PixelBro84 Configurator web project.
+
 ## [0.9.0] - 2026-07-26
 
-- Added a dedicated WS2812 cyclotron cake output on GPIO28.
+- Added a dedicated WS2812 cyclotron cake output, now assigned to GPIO27.
 - Added compile-time cake LED count and RGB configuration, defaulting to 12
   red LEDs.
 - Changed the cake animation to a continuous, single-LED circular chase.

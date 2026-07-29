@@ -2,15 +2,15 @@
 
 | Project field | Value |
 | --- | --- |
-| Version | 0.9.0 |
-| Release date | July 26, 2026 |
+| Version | 1.0.0 |
+| Release date | July 29, 2026 |
 | Programmer | Aaron Morris |
 | Company | A2ThreeD |
 
 Firmware for a Waveshare (or clone) RP2040-Zero that receives the Hasbro
 cyclotron's 800 kHz WS2812 data stream and drives four replacement RGB WS2812B
 LEDs in a chosen color. It also drives a synchronized cyclotron cake string on
-GPIO28. Both outputs default to red.
+GPIO27. Both outputs default to red.
 
 ## License
 
@@ -48,18 +48,18 @@ their exact 8 MHz receive and 800 kHz transmit rates.
 
 | Signal | RP2040-Zero pin |
 | --- | --- |
-| Incoming WS2812 data | GPIO2 |
+| Incoming WS2812 data | GPIO29 |
 | Recolored WS2812 output | GPIO3 |
-| Cyclotron cake WS2812 output | GPIO28 |
+| Cyclotron cake WS2812 output | GPIO27 |
 | Cyclotron lid sense, grounded when closed | GPIO4 |
-| Cyclotron lid open-drain output | GPIO29 |
+| Cyclotron lid open-drain output | GPIO28 |
 | Source/controller ground | GND |
 | LED power-supply ground | GND |
 
 The controller, RP2040-Zero, and LED power supply must share ground. The voltages that I've measure on the Hasbro 1984 pack are around 4.2V for the cyclotron LED output on the factory electronics. It's a good idea to use a 5V tolerant buffer or a
-resistor divider on GPIO2 when the source logic level exceeds 3.3V. My builds use a 1K/2K voltage divider circuit as an inexpensive method. A 220-470 ohm series resistor near the output driver is also recommended.
+resistor divider on GPIO29 when the source logic level exceeds 3.3V. My builds use a 1K/2K voltage divider circuit as an inexpensive method. A 220-470 ohm series resistor near the output driver is also recommended.
 
-GPIO28 drives the data input of the first cake WS2812 LED. The cake string must
+GPIO27 drives the data input of the first cake WS2812 LED. The cake string must
 share ground with the RP2040 and its LED power supply. Use the same appropriate
 logic-level shifting and series-resistor practices described for GPIO3.
 
@@ -75,25 +75,19 @@ For a 12-LED cake, LEDs 1, 4, 7, and 10 align with outer cyclotron LEDs 1, 2,
 3, and 4. The first complete outer interval after startup calibrates the chase
 speed. Other cake lengths are divided evenly across the same four phases.
 
-Set the cake length and fixed RGB color near the top of `src/main.c`:
-
-```c
-#define CAKE_LED_COUNT   12u
-#define CAKE_COLOR_RED   255u
-#define CAKE_COLOR_GREEN 0u
-#define CAKE_COLOR_BLUE  0u
-```
+Cake length, controller type, color order, bitrate, RGB color, direction, and
+start offset are runtime settings managed by the browser configurator.
 
 ## Cyclotron lid switch
 
 GPIO4 uses its internal pull-up and treats a connection to ground as lid
-installed/closed. GPIO29 mirrors that state as an open-drain-style output:
+installed/closed. GPIO28 mirrors that state as an open-drain-style output:
 
-- Lid closed: GPIO29 actively drives low.
-- Lid open: GPIO29 is an input with pulls disabled, so it is high-impedance.
-- At startup: GPIO29 defaults to high-impedance until a closed lid is debounced.
+- Lid closed: GPIO28 actively drives low.
+- Lid open: GPIO28 is an input with pulls disabled, so it is high-impedance.
+- At startup: GPIO28 defaults to high-impedance until a closed lid is debounced.
 
-GPIO29 never drives high. To bypass lid detection and keep GPIO29 low, change
+GPIO28 never drives high. To bypass lid detection and keep GPIO28 low, change
 this setting near the top of `src/main.c`:
 
 ```c
@@ -120,11 +114,11 @@ and PIO hardware.
 Pin assignments and target RGB values are near the top of `src/main.c`:
 
 ```c
-#define WS2812_INPUT_PIN  2u
+#define WS2812_INPUT_PIN  29u
 #define WS2812_OUTPUT_PIN 3u
-#define CAKE_OUTPUT_PIN   28u
+#define CAKE_OUTPUT_PIN   27u
 #define LID_SENSE_PIN     4u
-#define LID_OUTPUT_PIN    29u
+#define LID_OUTPUT_PIN    28u
 #define LID_DETECTION_BYPASS false
 ```
 
@@ -143,10 +137,34 @@ Red -> Green -> Blue -> Yellow -> Purple -> Red
 Hold BOOT for two seconds while running to toggle the cyclotron lid bypass. All
 four output LEDs flash red together twice to confirm the configuration change.
 
-The selected color and bypass state are saved one second after the last button
-action and restored the next time the pack powers on. Settings use a small
-wear-leveled log in the final 4 KB flash sector. Holding BOOT while powering or
-resetting the board still enters the RP2040 UF2 bootloader.
+All configuration values are stored in a wear-leveled log in the final 4 KB
+flash sector and restored when the pack powers on. Firmware 1.0.0 migrates
+existing color and lid-bypass records automatically. Holding BOOT while
+powering or resetting the board still enters the RP2040 UF2 bootloader.
+
+## Browser configurator
+
+Production firmware exposes a USB CDC configuration port. Open the standalone
+PixelBro84 Configurator in a Web Serial-capable desktop browser, connect the
+controller, adjust settings, test individual cake LEDs, and select **Save to
+PixelBro84**. The device validates the complete configuration before appending
+it to the flash journal.
+
+The configurator source is maintained in the sibling
+`PixelBro84-Configurator` project. USB CDC uses 115200 baud as a conventional
+host setting, although the emulated USB port does not depend on that baud rate.
+
+The versioned text protocol is also usable from a terminal:
+
+```text
+PB84 HELLO
+PB84 GET
+PB84 SET version=1 cake_led_count=12 cake_led_type=WS2812B cake_color_order=GRB cake_bit_rate_khz=800
+PB84 TEST led=1 red=255 green=0 blue=0 duration_ms=700
+```
+
+`SET` accepts partial updates, validates the resulting complete configuration,
+and replies with either `PB84 OK` or a descriptive `PB84 ERROR`.
 
 ## Power Considerations
 
@@ -154,8 +172,9 @@ The default mode of this project when idling and serial diagnostics enabled seem
 
 ## Serial diagnostics
 
-USB diagnostics are disabled by default to reduce idle power. Enable them in a
-separate debug build with:
+Verbose frame diagnostics are disabled by default. The lightweight USB
+configuration port remains available in every build. Enable frame reporting in
+a separate debug build with:
 
 ```sh
 cmake -S . -B build-debug \
@@ -180,6 +199,7 @@ Frame 12: 12 inputs -> 4 cyclotron LEDs
 The diagnostic frame buffer holds 256 pixels. Recoloring and output continue if
 a larger frame arrives, but only the first 256 pixels are listed in the report.
 
-With diagnostics disabled, the running firmware does not expose USB serial or
-the `picotool -f` reset interface. Hold BOOT while connecting USB to mount the
-`RPI-RP2` drive for future production firmware updates.
+With diagnostics disabled, USB serial carries configuration responses only and
+the `picotool -f` reset interface remains available. Holding BOOT while
+connecting USB still mounts the `RPI-RP2` drive for recovery and firmware
+updates.
