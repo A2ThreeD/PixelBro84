@@ -2,7 +2,7 @@
 
 | Project field | Value |
 | --- | --- |
-| Version | 1.0.0 |
+| Version | 1.1.0 |
 | Release date | July 29, 2026 |
 | Programmer | Aaron Morris |
 | Company | A2ThreeD |
@@ -146,9 +146,9 @@ powering or resetting the board still enters the RP2040 UF2 bootloader.
 
 Production firmware exposes a USB CDC configuration port. Open the standalone
 PixelBro84 Configurator in a Web Serial-capable desktop browser, connect the
-controller, adjust settings, test individual cake LEDs, and select **Save to
-PixelBro84**. The device validates the complete configuration before appending
-it to the flash journal.
+controller, adjust settings, test the four cyclotron LEDs or individual cake
+LEDs, and select **Save to PixelBro84**. The device validates the complete
+configuration before appending it to the flash journal.
 
 The configurator source is maintained in the sibling
 `PixelBro84-Configurator` project. USB CDC uses 115200 baud as a conventional
@@ -161,6 +161,7 @@ PB84 HELLO
 PB84 GET
 PB84 SET version=1 cake_led_count=12 cake_led_type=WS2812B cake_color_order=GRB cake_bit_rate_khz=800
 PB84 TEST led=1 red=255 green=0 blue=0 duration_ms=700
+PB84 TEST target=cyclotron led=1 color_index=0 duration_ms=700
 ```
 
 `SET` accepts partial updates, validates the resulting complete configuration,

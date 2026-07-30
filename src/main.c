@@ -177,14 +177,21 @@ typedef enum {
     CONFIG_REQUEST_TEST,
 } config_request_kind_t;
 
+typedef enum {
+    TEST_TARGET_CAKE,
+    TEST_TARGET_CYCLOTRON,
+} test_target_t;
+
 typedef struct {
     config_request_kind_t kind;
     user_config_t config;
+    test_target_t test_target;
     uint16_t test_led_index;
     uint16_t test_duration_ms;
     uint8_t test_red;
     uint8_t test_green;
     uint8_t test_blue;
+    uint8_t test_color_index;
 } config_request_t;
 
 typedef struct {
@@ -198,6 +205,8 @@ static queue_t config_request_queue;
 static queue_t config_response_queue;
 static absolute_time_t cake_test_until;
 static bool cake_test_active;
+static absolute_time_t cyclotron_test_until;
+static bool cyclotron_test_active;
 #if ENABLE_USB_DIAGNOSTICS
 static queue_t diagnostic_queue;
 static diagnostic_frame_t serial_frame;
@@ -707,6 +716,30 @@ static void output_cyclotron_frame(PIO pio, uint sm,
     }
 }
 
+// Light one of the four cyclotron outputs at full selected-color brightness.
+static void output_cyclotron_test(PIO pio, uint sm,
+                                  const config_request_t *request,
+                                  absolute_time_t now) {
+    const output_color_t *color =
+        &output_colors[request->test_color_index];
+    for (uint index = 0; index < OUTPUT_LED_COUNT; ++index) {
+        const uint32_t pixel =
+            index == request->test_led_index
+                ? recolored_grb(color, UINT8_MAX)
+                : 0u;
+        pio_sm_put_blocking(pio, sm, pixel << 8);
+    }
+    cyclotron_test_active = true;
+    cyclotron_test_until =
+        delayed_by_ms(now, request->test_duration_ms);
+}
+
+static void output_cyclotron_off(PIO pio, uint sm) {
+    for (uint index = 0; index < OUTPUT_LED_COUNT; ++index) {
+        pio_sm_put_blocking(pio, sm, 0u);
+    }
+}
+
 static void mark_cake_tx_busy(absolute_time_t started_at) {
     const uint32_t frame_us =
         user_config.cake_led_count *
@@ -823,7 +856,7 @@ static void queue_current_config(void) {
         user_config.lid_bypass ? "true" : "false");
 }
 
-static void process_config_request(PIO pio, uint cake_sm,
+static void process_config_request(PIO pio, uint cyclotron_sm, uint cake_sm,
                                    const config_request_t *request) {
     if (request->kind == CONFIG_REQUEST_GET) {
         queue_current_config();
@@ -831,6 +864,21 @@ static void process_config_request(PIO pio, uint cake_sm,
     }
 
     if (request->kind == CONFIG_REQUEST_TEST) {
+        if (request->test_target == TEST_TARGET_CYCLOTRON) {
+            if (request->test_led_index >= OUTPUT_LED_COUNT ||
+                request->test_color_index >= OUTPUT_COLOR_COUNT) {
+                queue_config_response(
+                    "PB84 ERROR cyclotron test values are out of range");
+                return;
+            }
+            output_cyclotron_test(
+                pio, cyclotron_sm, request, get_absolute_time());
+            queue_config_response(
+                "PB84 OK tested_target=cyclotron tested_led=%u",
+                request->test_led_index + 1);
+            return;
+        }
+
         if (request->test_led_index >= user_config.cake_led_count) {
             queue_config_response(
                 "PB84 ERROR test LED must be between 1 and %u",
@@ -838,7 +886,7 @@ static void process_config_request(PIO pio, uint cake_sm,
             return;
         }
         output_cake_test(pio, cake_sm, request, get_absolute_time());
-        queue_config_response("PB84 OK tested_led=%u",
+        queue_config_response("PB84 OK tested_target=cake tested_led=%u",
                               request->test_led_index + 1);
         return;
     }
@@ -1002,6 +1050,33 @@ static void handle_config_command(char *line) {
     }
 
     if (strncmp(line, "PB84 TEST ", 10) == 0) {
+        if (strncmp(line + 10, "target=cyclotron ", 17) == 0) {
+            unsigned int led = 0;
+            unsigned int color_index = 0;
+            unsigned int duration_ms = 0;
+            const int matched = sscanf(
+                line + 27,
+                "led=%u color_index=%u duration_ms=%u",
+                &led, &color_index, &duration_ms);
+            if (matched != 3 || led == 0 || led > OUTPUT_LED_COUNT ||
+                color_index >= OUTPUT_COLOR_COUNT ||
+                duration_ms < 100 || duration_ms > 10000) {
+                send_config_line(
+                    "PB84 ERROR invalid cyclotron TEST values");
+                return;
+            }
+
+            const config_request_t request = {
+                .kind = CONFIG_REQUEST_TEST,
+                .test_target = TEST_TARGET_CYCLOTRON,
+                .test_led_index = (uint16_t)(led - 1),
+                .test_duration_ms = (uint16_t)duration_ms,
+                .test_color_index = (uint8_t)color_index,
+            };
+            submit_config_request(&request);
+            return;
+        }
+
         unsigned int led = 0;
         unsigned int red = 0;
         unsigned int green = 0;
@@ -1021,6 +1096,7 @@ static void handle_config_command(char *line) {
 
         const config_request_t request = {
             .kind = CONFIG_REQUEST_TEST,
+            .test_target = TEST_TARGET_CAKE,
             .test_led_index = (uint16_t)(led - 1),
             .test_duration_ms = (uint16_t)duration_ms,
             .test_red = (uint8_t)red,
@@ -1191,7 +1267,9 @@ int main(void) {
                                                        : LID_STATE_OPEN;
             if (config_flash_phase == 0) {
                 const absolute_time_t frame_time = get_absolute_time();
-                output_cyclotron_frame(pio, tx_sm, &capture_frame);
+                if (!cyclotron_test_active) {
+                    output_cyclotron_frame(pio, tx_sm, &capture_frame);
+                }
                 if (!cake_test_active) {
                     output_cake_frame(pio, cake_tx_sm, &capture_frame,
                                       frame_time);
@@ -1208,7 +1286,14 @@ int main(void) {
         config_request_t config_request;
         if (!receiving_frame &&
             queue_try_remove(&config_request_queue, &config_request)) {
-            process_config_request(pio, cake_tx_sm, &config_request);
+            process_config_request(
+                pio, tx_sm, cake_tx_sm, &config_request);
+        }
+
+        if (cyclotron_test_active &&
+            time_reached(cyclotron_test_until)) {
+            cyclotron_test_active = false;
+            output_cyclotron_off(pio, tx_sm);
         }
 
         if (cake_test_active && time_reached(cake_test_until)) {

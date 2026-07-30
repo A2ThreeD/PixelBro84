@@ -2,6 +2,11 @@
 
 All notable project changes are documented here.
 
+## [1.1.0] - 2026-07-29
+
+- Added browser-configurator testing for each of the four cyclotron LEDs.
+- Added a cyclotron test target to the USB configuration protocol.
+
 ## [1.0.0] - 2026-07-29
 
 - Added an always-available USB CDC configuration protocol for the browser
