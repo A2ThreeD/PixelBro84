@@ -2,6 +2,11 @@
 
 All notable project changes are documented here.
 
+## [1.2.1] - 2026-08-03
+
+- Fixed Solid cyclotron animations changing palette color after each completed
+  free-running rotation.
+
 ## [1.2.0] - 2026-08-03
 
 - Added synchronized Cake chase speeds of 1×–5×, 10×, and 20×.

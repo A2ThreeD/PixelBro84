@@ -1316,7 +1316,7 @@ static void refresh_cyclotron_output(PIO pio, uint sm,
     }
 
     const output_color_t *color =
-        &output_colors[(user_config.outer_color_index + sample.rotation) %
+        &output_colors[(user_config.outer_color_index + rendered_rotation) %
                        OUTPUT_COLOR_COUNT];
     static const uint8_t trail_levels[] = {255, 144, 72, 32};
     for (uint index = 0; index < user_config.cyclotron_led_count; ++index) {
