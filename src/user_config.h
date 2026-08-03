@@ -5,8 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define USER_CONFIG_VERSION 2u
+#define USER_CONFIG_VERSION 4u
 #define CAKE_LED_COUNT_MAX 64u
+#define CYCLOTRON_WINDOW_COUNT 4u
+#define CYCLOTRON_LED_COUNT_MAX 36u
 #define CAKE_ROTATION_MS_MIN 100u
 #define CAKE_ROTATION_MS_MAX 10000u
 
@@ -32,6 +34,13 @@ typedef enum {
     CAKE_EFFECT_COLOR_SHIFT,
 } cake_effect_t;
 
+typedef enum {
+    CYCLOTRON_STYLE_SINGLE,
+    CYCLOTRON_STYLE_PUCK_3,
+    CYCLOTRON_STYLE_PUCK_5,
+    CYCLOTRON_STYLE_PUCK_9,
+} cyclotron_led_style_t;
+
 typedef struct {
     uint16_t version;
     uint16_t cake_led_count;
@@ -50,7 +59,21 @@ typedef struct {
     uint8_t cake_speed_multiplier;
     uint8_t cake_effect;
     uint8_t reserved[3];
+    uint16_t cyclotron_led_count;
+    uint16_t cyclotron_bit_rate_khz;
+    uint16_t cyclotron_rotation_ms;
+    uint8_t cyclotron_led_type;
+    uint8_t cyclotron_color_order;
+    uint8_t cyclotron_reverse;
+    uint8_t cyclotron_timing_mode;
+    uint8_t cyclotron_speed_multiplier;
+    uint8_t cyclotron_effect;
+    uint8_t cyclotron_led_style;
+    uint8_t cyclotron_reserved[3];
 } user_config_t;
+
+uint16_t cyclotron_led_count_for_style(uint8_t style);
+const char *cyclotron_led_style_name(uint8_t style);
 
 void user_config_set_defaults(user_config_t *config);
 

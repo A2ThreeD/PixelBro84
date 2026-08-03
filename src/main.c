@@ -16,7 +16,7 @@
 #  if __has_include(<hardware/clocks.h>)
 #    include <hardware/clocks.h>
 #  else
-#    include <stdbool.h>gp
+#    include <stdbool.h>
 #    include <stdint.h>
 extern bool set_sys_clock_khz(uint32_t sys_clock_khz, bool required);
 extern uint32_t clock_get_hz(uint32_t clk);
@@ -78,6 +78,7 @@ bi_decl(bi_program_description(PROJECT_CHANGE_SUMMARY));
 #define LID_POLL_MS 5u
 #define LID_DEBOUNCE_MS 20u
 #define CAKE_REFRESH_MS 5u
+#define INPUT_IDLE_OFF_MS 250u
 #define COLOR_SAVE_DELAY_MS 1000u
 #define CONFIG_FLASH_ON_MS 150u
 #define CONFIG_FLASH_OFF_MS 120u
@@ -118,8 +119,79 @@ typedef struct {
         FLASH_PAGE_SIZE - 12 - sizeof(user_config_t)];
 } user_settings_record_t;
 
-// Firmware 1.0/1.1 used version 1 of the user configuration. Keep its exact
-// layout so an upgrade can retain the installed hardware and color settings.
+// Firmware 1.2 used version 3 of the user configuration. Keep its exact
+// layout so an upgrade retains the existing four-pixel cyclotron setup.
+typedef struct {
+    uint16_t version;
+    uint16_t cake_led_count;
+    uint16_t cake_bit_rate_khz;
+    uint16_t cake_start_offset;
+    uint16_t cake_rotation_ms;
+    uint8_t outer_color_index;
+    uint8_t cake_led_type;
+    uint8_t cake_color_order;
+    uint8_t cake_red;
+    uint8_t cake_green;
+    uint8_t cake_blue;
+    uint8_t cake_reverse;
+    uint8_t lid_bypass;
+    uint8_t cake_timing_mode;
+    uint8_t cake_speed_multiplier;
+    uint8_t cake_effect;
+    uint8_t reserved[3];
+    uint16_t cyclotron_led_count;
+    uint16_t cyclotron_bit_rate_khz;
+    uint16_t cyclotron_rotation_ms;
+    uint8_t cyclotron_led_type;
+    uint8_t cyclotron_color_order;
+    uint8_t cyclotron_reverse;
+    uint8_t cyclotron_timing_mode;
+    uint8_t cyclotron_speed_multiplier;
+    uint8_t cyclotron_effect;
+    uint8_t cyclotron_reserved[4];
+} user_config_v3_t;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t sequence;
+    user_config_v3_t config;
+    uint32_t checksum;
+    uint8_t padding[
+        FLASH_PAGE_SIZE - 12 - sizeof(user_config_v3_t)];
+} user_settings_record_v3_t;
+
+// Firmware 1.2 used version 2 of the user configuration. Keep its exact
+// layout so an upgrade can retain all existing Cake settings.
+typedef struct {
+    uint16_t version;
+    uint16_t cake_led_count;
+    uint16_t cake_bit_rate_khz;
+    uint16_t cake_start_offset;
+    uint16_t cake_rotation_ms;
+    uint8_t outer_color_index;
+    uint8_t cake_led_type;
+    uint8_t cake_color_order;
+    uint8_t cake_red;
+    uint8_t cake_green;
+    uint8_t cake_blue;
+    uint8_t cake_reverse;
+    uint8_t lid_bypass;
+    uint8_t cake_timing_mode;
+    uint8_t cake_speed_multiplier;
+    uint8_t cake_effect;
+    uint8_t reserved[3];
+} user_config_v2_t;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t sequence;
+    user_config_v2_t config;
+    uint32_t checksum;
+    uint8_t padding[
+        FLASH_PAGE_SIZE - 12 - sizeof(user_config_v2_t)];
+} user_settings_record_v2_t;
+
+// Firmware 1.0/1.1 used version 1 of the user configuration.
 typedef struct {
     uint16_t version;
     uint16_t cake_led_count;
@@ -154,8 +226,12 @@ _Static_assert(sizeof(legacy_settings_record_t) == FLASH_PAGE_SIZE,
                "Legacy setting must occupy exactly one flash page");
 _Static_assert(sizeof(user_settings_record_t) == FLASH_PAGE_SIZE,
                "User setting must occupy exactly one flash page");
+_Static_assert(sizeof(user_settings_record_v3_t) == FLASH_PAGE_SIZE,
+               "Version 3 user setting must occupy exactly one flash page");
 _Static_assert(sizeof(user_settings_record_v1_t) == FLASH_PAGE_SIZE,
                "Version 1 user setting must occupy exactly one flash page");
+_Static_assert(sizeof(user_settings_record_v2_t) == FLASH_PAGE_SIZE,
+               "Version 2 user setting must occupy exactly one flash page");
 
 static const output_color_t output_colors[] = {
     {255, 0, 0, "Red"},
@@ -204,9 +280,34 @@ typedef struct {
     uint8_t step_progress;
 } cake_animation_sample_t;
 
-#define CONFIG_PROTOCOL_VERSION 2u
-#define CONFIG_COMMAND_MAX 512u
-#define CONFIG_MESSAGE_MAX 512u
+typedef struct {
+    absolute_time_t phase_started_at;
+    absolute_time_t free_started_at;
+    absolute_time_t tx_ready_at;
+    uint32_t phase_duration_us[OUTPUT_LED_COUNT];
+    uint32_t fallback_duration_us;
+    uint32_t sync_cycle_count;
+    uint16_t output_led_index;
+    uint8_t current_phase;
+    uint8_t valid_duration_mask;
+    uint8_t source_brightness;
+    uint8_t output_brightness;
+    uint8_t output_effect_level;
+    uint32_t output_rotation;
+    bool initialized;
+    bool phase_start_known;
+    bool output_valid;
+} cyclotron_chase_state_t;
+
+typedef struct {
+    uint32_t rotation;
+    uint16_t logical_index;
+    uint8_t step_progress;
+} cyclotron_animation_sample_t;
+
+#define CONFIG_PROTOCOL_VERSION 4u
+#define CONFIG_COMMAND_MAX 1024u
+#define CONFIG_MESSAGE_MAX 1024u
 #define CONFIG_QUEUE_DEPTH 4u
 
 typedef enum {
@@ -241,12 +342,17 @@ typedef struct {
 // State shared by frame capture, settings persistence, and the second core.
 static diagnostic_frame_t capture_frame;
 static cake_chase_state_t cake_chase;
+static cyclotron_chase_state_t cyclotron_chase;
 static queue_t config_request_queue;
 static queue_t config_response_queue;
 static absolute_time_t cake_test_until;
 static bool cake_test_active;
 static absolute_time_t cyclotron_test_until;
 static bool cyclotron_test_active;
+// WS2812 pixels retain their last frame. Track whether a clear has already
+// been latched so an idle input does not continuously transmit zero frames.
+// Repeated "off" traffic can itself be misread by marginal 3.3 V data links.
+static bool cyclotron_output_is_off;
 #if ENABLE_USB_DIAGNOSTICS
 static queue_t diagnostic_queue;
 static diagnostic_frame_t serial_frame;
@@ -262,6 +368,8 @@ static settings_flash_write_t settings_flash_write;
 static PIO rx_wake_pio;
 static uint rx_wake_sm;
 static repeating_timer_t idle_wake_timer;
+
+static void output_cyclotron_off(PIO pio, uint sm);
 
 enum {
     LID_STATE_OPEN,
@@ -429,6 +537,36 @@ static uint32_t user_settings_checksum_v1(
     return hash ^ USER_SETTINGS_MAGIC;
 }
 
+static uint32_t user_settings_checksum_v2(
+    uint32_t sequence, const user_config_v2_t *config) {
+    uint32_t hash = 2166136261u;
+    const uint8_t *sequence_bytes = (const uint8_t *)&sequence;
+    const uint8_t *config_bytes = (const uint8_t *)config;
+
+    for (size_t index = 0; index < sizeof(sequence); ++index) {
+        hash = (hash ^ sequence_bytes[index]) * 16777619u;
+    }
+    for (size_t index = 0; index < sizeof(*config); ++index) {
+        hash = (hash ^ config_bytes[index]) * 16777619u;
+    }
+    return hash ^ USER_SETTINGS_MAGIC;
+}
+
+static uint32_t user_settings_checksum_v3(
+    uint32_t sequence, const user_config_v3_t *config) {
+    uint32_t hash = 2166136261u;
+    const uint8_t *sequence_bytes = (const uint8_t *)&sequence;
+    const uint8_t *config_bytes = (const uint8_t *)config;
+
+    for (size_t index = 0; index < sizeof(sequence); ++index) {
+        hash = (hash ^ sequence_bytes[index]) * 16777619u;
+    }
+    for (size_t index = 0; index < sizeof(*config); ++index) {
+        hash = (hash ^ config_bytes[index]) * 16777619u;
+    }
+    return hash ^ USER_SETTINGS_MAGIC;
+}
+
 static bool user_settings_record_valid(
     const user_settings_record_t *record) {
     char error[1];
@@ -455,6 +593,127 @@ static bool user_settings_record_v1_valid(
            config->cake_reverse <= 1 && config->lid_bypass <= 1 &&
            record->checksum ==
                user_settings_checksum_v1(record->sequence, config);
+}
+
+static bool user_settings_record_v2_valid(
+    const user_settings_record_v2_t *record) {
+    const user_config_v2_t *config = &record->config;
+    return record->magic == USER_SETTINGS_MAGIC &&
+           config->version == 2u &&
+           config->cake_led_count > 0 &&
+           config->cake_led_count <= CAKE_LED_COUNT_MAX &&
+           (config->cake_bit_rate_khz == 400 ||
+            config->cake_bit_rate_khz == 800) &&
+           config->cake_start_offset < config->cake_led_count &&
+           config->cake_rotation_ms >= CAKE_ROTATION_MS_MIN &&
+           config->cake_rotation_ms <= CAKE_ROTATION_MS_MAX &&
+           config->outer_color_index < OUTPUT_COLOR_COUNT &&
+           config->cake_led_type <= CAKE_LED_TYPE_WS2811 &&
+           config->cake_color_order <= CAKE_COLOR_ORDER_RGB &&
+           config->cake_reverse <= 1 && config->lid_bypass <= 1 &&
+           config->cake_timing_mode <= CAKE_TIMING_FREE &&
+           ((config->cake_speed_multiplier >= 1 &&
+             config->cake_speed_multiplier <= 5) ||
+            config->cake_speed_multiplier == 10 ||
+            config->cake_speed_multiplier == 20) &&
+           config->cake_effect <= CAKE_EFFECT_COLOR_SHIFT &&
+           record->checksum ==
+               user_settings_checksum_v2(record->sequence, config);
+}
+
+static bool user_settings_record_v3_valid(
+    const user_settings_record_v3_t *record) {
+    const user_config_v3_t *config = &record->config;
+    return record->magic == USER_SETTINGS_MAGIC &&
+           config->version == 3u &&
+           config->cake_led_count > 0 &&
+           config->cake_led_count <= CAKE_LED_COUNT_MAX &&
+           (config->cake_bit_rate_khz == 400 ||
+            config->cake_bit_rate_khz == 800) &&
+           config->cake_start_offset < config->cake_led_count &&
+           config->cake_rotation_ms >= CAKE_ROTATION_MS_MIN &&
+           config->cake_rotation_ms <= CAKE_ROTATION_MS_MAX &&
+           config->outer_color_index < OUTPUT_COLOR_COUNT &&
+           config->cake_led_type <= CAKE_LED_TYPE_WS2811 &&
+           config->cake_color_order <= CAKE_COLOR_ORDER_RGB &&
+           config->cake_reverse <= 1 && config->lid_bypass <= 1 &&
+           config->cake_timing_mode <= CAKE_TIMING_FREE &&
+           ((config->cake_speed_multiplier >= 1 &&
+             config->cake_speed_multiplier <= 5) ||
+            config->cake_speed_multiplier == 10 ||
+            config->cake_speed_multiplier == 20) &&
+           config->cake_effect <= CAKE_EFFECT_COLOR_SHIFT &&
+           config->cyclotron_led_count > 0 &&
+           config->cyclotron_led_count <= CYCLOTRON_WINDOW_COUNT &&
+           (config->cyclotron_bit_rate_khz == 400 ||
+            config->cyclotron_bit_rate_khz == 800) &&
+           config->cyclotron_rotation_ms >= CAKE_ROTATION_MS_MIN &&
+           config->cyclotron_rotation_ms <= CAKE_ROTATION_MS_MAX &&
+           config->cyclotron_led_type <= CAKE_LED_TYPE_WS2811 &&
+           config->cyclotron_color_order <= CAKE_COLOR_ORDER_RGB &&
+           config->cyclotron_reverse <= 1 &&
+           config->cyclotron_timing_mode <= CAKE_TIMING_FREE &&
+           ((config->cyclotron_speed_multiplier >= 1 &&
+             config->cyclotron_speed_multiplier <= 5) ||
+            config->cyclotron_speed_multiplier == 10 ||
+            config->cyclotron_speed_multiplier == 20) &&
+           config->cyclotron_effect <= CAKE_EFFECT_COLOR_SHIFT &&
+           record->checksum ==
+               user_settings_checksum_v3(record->sequence, config);
+}
+
+static void migrate_user_config_v3(const user_config_v3_t *old_config,
+                                   user_config_t *new_config) {
+    user_config_set_defaults(new_config);
+    new_config->cake_led_count = old_config->cake_led_count;
+    new_config->cake_bit_rate_khz = old_config->cake_bit_rate_khz;
+    new_config->cake_start_offset = old_config->cake_start_offset;
+    new_config->cake_rotation_ms = old_config->cake_rotation_ms;
+    new_config->outer_color_index = old_config->outer_color_index;
+    new_config->cake_led_type = old_config->cake_led_type;
+    new_config->cake_color_order = old_config->cake_color_order;
+    new_config->cake_red = old_config->cake_red;
+    new_config->cake_green = old_config->cake_green;
+    new_config->cake_blue = old_config->cake_blue;
+    new_config->cake_reverse = old_config->cake_reverse;
+    new_config->lid_bypass = old_config->lid_bypass;
+    new_config->cake_timing_mode = old_config->cake_timing_mode;
+    new_config->cake_speed_multiplier = old_config->cake_speed_multiplier;
+    new_config->cake_effect = old_config->cake_effect;
+    new_config->cyclotron_bit_rate_khz = old_config->cyclotron_bit_rate_khz;
+    new_config->cyclotron_rotation_ms = old_config->cyclotron_rotation_ms;
+    new_config->cyclotron_led_type = old_config->cyclotron_led_type;
+    new_config->cyclotron_color_order = old_config->cyclotron_color_order;
+    new_config->cyclotron_reverse = old_config->cyclotron_reverse;
+    new_config->cyclotron_timing_mode = old_config->cyclotron_timing_mode;
+    new_config->cyclotron_speed_multiplier =
+        old_config->cyclotron_speed_multiplier;
+    new_config->cyclotron_effect = old_config->cyclotron_effect;
+    // Version 3 supported a custom count from one through four. The new
+    // style model represents that legacy range with four single pixels.
+    new_config->cyclotron_led_style = CYCLOTRON_STYLE_SINGLE;
+    new_config->cyclotron_led_count =
+        cyclotron_led_count_for_style(new_config->cyclotron_led_style);
+}
+
+static void migrate_user_config_v2(const user_config_v2_t *old_config,
+                                   user_config_t *new_config) {
+    user_config_set_defaults(new_config);
+    new_config->cake_led_count = old_config->cake_led_count;
+    new_config->cake_bit_rate_khz = old_config->cake_bit_rate_khz;
+    new_config->cake_start_offset = old_config->cake_start_offset;
+    new_config->cake_rotation_ms = old_config->cake_rotation_ms;
+    new_config->outer_color_index = old_config->outer_color_index;
+    new_config->cake_led_type = old_config->cake_led_type;
+    new_config->cake_color_order = old_config->cake_color_order;
+    new_config->cake_red = old_config->cake_red;
+    new_config->cake_green = old_config->cake_green;
+    new_config->cake_blue = old_config->cake_blue;
+    new_config->cake_reverse = old_config->cake_reverse;
+    new_config->lid_bypass = old_config->lid_bypass;
+    new_config->cake_timing_mode = old_config->cake_timing_mode;
+    new_config->cake_speed_multiplier = old_config->cake_speed_multiplier;
+    new_config->cake_effect = old_config->cake_effect;
 }
 
 static void migrate_user_config_v1(const user_config_v1_t *old_config,
@@ -498,15 +757,37 @@ static void load_user_setting(void) {
                 settings_sequence = record->sequence;
                 found = true;
             } else {
-                const user_settings_record_v1_t *old_record =
-                    (const user_settings_record_v1_t *)page;
-                if (user_settings_record_v1_valid(old_record) &&
+                const user_settings_record_v3_t *v3_record =
+                    (const user_settings_record_v3_t *)page;
+                if (user_settings_record_v3_valid(v3_record) &&
                     (!found ||
-                     old_record->sequence >= settings_sequence)) {
-                    migrate_user_config_v1(
-                        &old_record->config, &user_config);
-                    settings_sequence = old_record->sequence;
+                     v3_record->sequence >= settings_sequence)) {
+                    migrate_user_config_v3(
+                        &v3_record->config, &user_config);
+                    settings_sequence = v3_record->sequence;
                     found = true;
+                } else {
+                    const user_settings_record_v2_t *v2_record =
+                        (const user_settings_record_v2_t *)page;
+                    if (user_settings_record_v2_valid(v2_record) &&
+                        (!found ||
+                         v2_record->sequence >= settings_sequence)) {
+                        migrate_user_config_v2(
+                            &v2_record->config, &user_config);
+                        settings_sequence = v2_record->sequence;
+                        found = true;
+                    } else {
+                        const user_settings_record_v1_t *old_record =
+                            (const user_settings_record_v1_t *)page;
+                        if (user_settings_record_v1_valid(old_record) &&
+                            (!found ||
+                             old_record->sequence >= settings_sequence)) {
+                            migrate_user_config_v1(
+                                &old_record->config, &user_config);
+                            settings_sequence = old_record->sequence;
+                            found = true;
+                        }
+                    }
                 }
             }
         } else if (magic == COLOR_SETTINGS_MAGIC) {
@@ -656,27 +937,32 @@ static uint8_t input_brightness(uint32_t input_grb) {
     return max3(red, green, blue);
 }
 
-static uint8_t mapped_brightness(const diagnostic_frame_t *frame,
-                                 uint output_index) {
+static uint8_t source_phase_brightness(const diagnostic_frame_t *frame,
+                                       uint phase) {
     // The four factory lenses consume these one-based address groups:
     // 2-4, 5-7, 8-10, and 11-12 plus 1 (wrapping around the frame).
     // Use each group's center emitter (inputs 3, 6, 9, and 12). Averaging
     // causes adjacent outputs 4 and 1 to overlap during the wrap transition.
     const uint center_input_index =
-        2u + output_index * INPUTS_PER_OUTPUT;
+        2u + phase * INPUTS_PER_OUTPUT;
     return input_brightness(frame->pixels[center_input_index]);
+}
+
+static uint8_t mapped_brightness(const diagnostic_frame_t *frame,
+                                 uint window_index) {
+    return source_phase_brightness(frame, window_index);
 }
 
 static uint8_t brightest_cyclotron_phase(
     const diagnostic_frame_t *frame, uint8_t retained_phase,
     uint8_t *brightness) {
     uint8_t brightest_phase = retained_phase;
-    uint8_t brightest = mapped_brightness(frame, retained_phase);
+    uint8_t brightest = source_phase_brightness(frame, retained_phase);
 
     // Retain the current phase on equal brightness to prevent an overlap
     // frame from bouncing the chase backward and forward.
     for (uint8_t phase = 0; phase < OUTPUT_LED_COUNT; ++phase) {
-        const uint8_t candidate = mapped_brightness(frame, phase);
+        const uint8_t candidate = source_phase_brightness(frame, phase);
         if (candidate > brightest) {
             brightest = candidate;
             brightest_phase = phase;
@@ -847,6 +1133,226 @@ static uint32_t recolored_cake_pixel(uint8_t red, uint8_t green,
         scale_channel(blue, brightness));
 }
 
+static uint32_t packed_cyclotron_pixel(uint8_t red, uint8_t green,
+                                       uint8_t blue, uint8_t brightness) {
+    red = scale_channel(red, brightness);
+    green = scale_channel(green, brightness);
+    blue = scale_channel(blue, brightness);
+    if (user_config.cyclotron_color_order == CAKE_COLOR_ORDER_RGB) {
+        return ((uint32_t)red << 16) | ((uint32_t)green << 8) | blue;
+    }
+    return ((uint32_t)green << 16) | ((uint32_t)red << 8) | blue;
+}
+
+static uint16_t cyclotron_physical_led_index(uint16_t logical_index) {
+    // Each window occupies one puck segment; only its middle pixel is used.
+    const uint16_t segment_count =
+        user_config.cyclotron_led_count / OUTPUT_LED_COUNT;
+    const uint16_t active_index =
+        logical_index * segment_count + segment_count / 2u;
+    const uint16_t count = user_config.cyclotron_led_count;
+    if (user_config.cyclotron_reverse != 0) {
+        return (uint16_t)(count - 1u - active_index);
+    }
+    return active_index;
+}
+
+static uint8_t cyclotron_physical_brightness(
+    const diagnostic_frame_t *frame, uint16_t physical_index) {
+    for (uint window = 0; window < OUTPUT_LED_COUNT; ++window) {
+        if (cyclotron_physical_led_index(window) == physical_index) {
+            return mapped_brightness(frame, window);
+        }
+    }
+    return 0;
+}
+
+static void update_cyclotron_chase(const diagnostic_frame_t *frame,
+                                   absolute_time_t now) {
+    uint8_t brightness = 0;
+    const uint8_t retained_phase =
+        cyclotron_chase.initialized ? cyclotron_chase.current_phase : 0;
+    const uint8_t phase =
+        brightest_cyclotron_phase(frame, retained_phase, &brightness);
+
+    if (brightness == 0) {
+        cyclotron_chase.initialized = false;
+        cyclotron_chase.output_valid = false;
+        cyclotron_chase.source_brightness = 0;
+        return;
+    }
+
+    if (!cyclotron_chase.initialized) {
+        cyclotron_chase.initialized = true;
+        cyclotron_chase.current_phase = phase;
+        cyclotron_chase.phase_started_at = now;
+        cyclotron_chase.free_started_at = now;
+    } else if (phase != cyclotron_chase.current_phase) {
+        if (phase < cyclotron_chase.current_phase) {
+            ++cyclotron_chase.sync_cycle_count;
+        }
+        const int64_t measured_us =
+            absolute_time_diff_us(cyclotron_chase.phase_started_at, now);
+        if (cyclotron_chase.phase_start_known && measured_us > 0) {
+            const uint32_t duration_us =
+                measured_us > UINT32_MAX ? UINT32_MAX
+                                         : (uint32_t)measured_us;
+            cyclotron_chase.phase_duration_us[
+                cyclotron_chase.current_phase] = duration_us;
+            cyclotron_chase.fallback_duration_us = duration_us;
+            cyclotron_chase.valid_duration_mask |=
+                (uint8_t)(1u << cyclotron_chase.current_phase);
+        }
+        cyclotron_chase.phase_start_known = true;
+        cyclotron_chase.current_phase = phase;
+        cyclotron_chase.phase_started_at = now;
+    }
+
+    cyclotron_chase.source_brightness =
+        user_config.cyclotron_timing_mode == CAKE_TIMING_FREE
+            ? UINT8_MAX
+            : source_phase_brightness(frame, phase);
+}
+
+static cyclotron_animation_sample_t cyclotron_chase_sample(
+    absolute_time_t now) {
+    uint64_t rotation_progress_us = 0;
+    uint64_t rotation_duration_us = 0;
+    uint64_t completed_rotations = 0;
+
+    if (user_config.cyclotron_timing_mode == CAKE_TIMING_FREE) {
+        rotation_duration_us =
+            (uint64_t)user_config.cyclotron_rotation_ms * 1000u;
+        const int64_t measured_us =
+            absolute_time_diff_us(cyclotron_chase.free_started_at, now);
+        const uint64_t elapsed_us =
+            measured_us > 0 ? (uint64_t)measured_us : 0u;
+        completed_rotations = elapsed_us / rotation_duration_us;
+        rotation_progress_us = elapsed_us % rotation_duration_us;
+    } else {
+        const uint8_t current_phase = cyclotron_chase.current_phase;
+        uint32_t phase_duration_us = cyclotron_chase.fallback_duration_us;
+        if ((cyclotron_chase.valid_duration_mask & (1u << current_phase)) != 0) {
+            phase_duration_us =
+                cyclotron_chase.phase_duration_us[current_phase];
+        }
+        uint64_t elapsed_us = 0;
+        if (phase_duration_us > 0) {
+            const int64_t measured_us =
+                absolute_time_diff_us(cyclotron_chase.phase_started_at, now);
+            if (measured_us > 0) elapsed_us = (uint64_t)measured_us;
+            if (elapsed_us >= phase_duration_us) {
+                elapsed_us = phase_duration_us - 1u;
+            }
+        }
+        rotation_duration_us =
+            (uint64_t)OUTPUT_LED_COUNT * phase_duration_us;
+        if (rotation_duration_us == 0) {
+            return (cyclotron_animation_sample_t){
+                .rotation = cyclotron_chase.sync_cycle_count *
+                            user_config.cyclotron_speed_multiplier,
+                .logical_index = cyclotron_chase.current_phase %
+                                 OUTPUT_LED_COUNT,
+                .step_progress = 0,
+            };
+        }
+        const uint64_t outer_progress_us =
+            (uint64_t)current_phase * phase_duration_us + elapsed_us;
+        const uint64_t scaled_progress_us =
+            outer_progress_us * user_config.cyclotron_speed_multiplier;
+        completed_rotations =
+            (uint64_t)cyclotron_chase.sync_cycle_count *
+                user_config.cyclotron_speed_multiplier +
+            scaled_progress_us / rotation_duration_us;
+        rotation_progress_us = scaled_progress_us % rotation_duration_us;
+    }
+
+    const uint64_t pixel_progress =
+        rotation_progress_us * OUTPUT_LED_COUNT;
+    return (cyclotron_animation_sample_t){
+        .rotation = (uint32_t)completed_rotations,
+        .logical_index =
+            (uint16_t)(pixel_progress / rotation_duration_us),
+        .step_progress = (uint8_t)(
+            ((pixel_progress % rotation_duration_us) * 255u) /
+            rotation_duration_us),
+    };
+}
+
+static void mark_cyclotron_tx_busy(absolute_time_t started_at) {
+    const uint32_t frame_us =
+        user_config.cyclotron_led_count *
+            (24000u / user_config.cyclotron_bit_rate_khz) +
+        WS2812_RESET_US;
+    cyclotron_chase.tx_ready_at = delayed_by_us(started_at, frame_us);
+}
+
+static void refresh_cyclotron_output(PIO pio, uint sm,
+                                     absolute_time_t now) {
+    if (!cyclotron_chase.initialized ||
+        !time_reached(cyclotron_chase.tx_ready_at)) {
+        return;
+    }
+
+    const cyclotron_animation_sample_t sample =
+        cyclotron_chase_sample(now);
+    const uint16_t active_index =
+        cyclotron_physical_led_index(sample.logical_index);
+    const uint8_t effect_level =
+        user_config.cyclotron_effect == CAKE_EFFECT_FADE
+            ? sample.step_progress
+            : 0;
+    const uint32_t rendered_rotation =
+        user_config.cyclotron_effect == CAKE_EFFECT_COLOR_SHIFT
+            ? sample.rotation
+            : 0;
+    if (cyclotron_chase.output_valid &&
+        active_index == cyclotron_chase.output_led_index &&
+        cyclotron_chase.source_brightness ==
+            cyclotron_chase.output_brightness &&
+        effect_level == cyclotron_chase.output_effect_level &&
+        rendered_rotation == cyclotron_chase.output_rotation) {
+        return;
+    }
+
+    const output_color_t *color =
+        &output_colors[(user_config.outer_color_index + sample.rotation) %
+                       OUTPUT_COLOR_COUNT];
+    static const uint8_t trail_levels[] = {255, 144, 72, 32};
+    for (uint index = 0; index < user_config.cyclotron_led_count; ++index) {
+        uint8_t effect_brightness = 0;
+        if (user_config.cyclotron_effect == CAKE_EFFECT_TRAIL) {
+            for (uint8_t distance = 0; distance < OUTPUT_LED_COUNT;
+                 ++distance) {
+                const uint16_t logical_index = (uint16_t)(
+                    (sample.logical_index + OUTPUT_LED_COUNT - distance) %
+                    OUTPUT_LED_COUNT);
+                if (index == cyclotron_physical_led_index(logical_index)) {
+                    effect_brightness = trail_levels[distance];
+                    break;
+                }
+            }
+        } else if (index == active_index) {
+            effect_brightness =
+                user_config.cyclotron_effect == CAKE_EFFECT_FADE
+                    ? (uint8_t)(255u - sample.step_progress)
+                    : 255u;
+        }
+        pio_sm_put_blocking(
+            pio, sm,
+            packed_cyclotron_pixel(color->red, color->green, color->blue,
+                                   scale_channel(cyclotron_chase.source_brightness,
+                                                 effect_brightness)) << 8);
+    }
+    mark_cyclotron_tx_busy(now);
+    cyclotron_chase.output_led_index = active_index;
+    cyclotron_chase.output_brightness = cyclotron_chase.source_brightness;
+    cyclotron_chase.output_effect_level = effect_level;
+    cyclotron_chase.output_rotation = rendered_rotation;
+    cyclotron_chase.output_valid = true;
+    cyclotron_output_is_off = false;
+}
+
 // Emit one completed source frame to the four outer cyclotron LEDs.
 static void output_cyclotron_frame(PIO pio, uint sm,
                                    const diagnostic_frame_t *frame) {
@@ -854,13 +1360,35 @@ static void output_cyclotron_frame(PIO pio, uint sm,
         return;
     }
 
-    for (uint output_index = 0; output_index < OUTPUT_LED_COUNT; ++output_index) {
-        const uint8_t brightness = mapped_brightness(frame, output_index);
+    update_cyclotron_chase(frame, get_absolute_time());
+    if (!cyclotron_chase.initialized) {
+        output_cyclotron_off(pio, sm);
+        return;
+    }
+
+    if (user_config.cyclotron_timing_mode == CAKE_TIMING_SYNCED &&
+        user_config.cyclotron_speed_multiplier == 1 &&
+        user_config.cyclotron_effect == CAKE_EFFECT_SOLID) {
+        const absolute_time_t now = get_absolute_time();
+        if (!time_reached(cyclotron_chase.tx_ready_at)) return;
         const output_color_t *color =
             &output_colors[user_config.outer_color_index];
-        pio_sm_put_blocking(pio, sm,
-                            recolored_grb(color, brightness) << 8);
+        for (uint index = 0;
+             index < user_config.cyclotron_led_count; ++index) {
+            const uint8_t brightness =
+                cyclotron_physical_brightness(frame, index);
+            pio_sm_put_blocking(
+                pio, sm,
+                packed_cyclotron_pixel(color->red, color->green, color->blue,
+                                       brightness) << 8);
+        }
+        mark_cyclotron_tx_busy(now);
+        cyclotron_chase.output_valid = false;
+        cyclotron_output_is_off = false;
+        return;
     }
+
+    refresh_cyclotron_output(pio, sm, get_absolute_time());
 }
 
 // Light one of the four cyclotron outputs at full selected-color brightness.
@@ -869,22 +1397,32 @@ static void output_cyclotron_test(PIO pio, uint sm,
                                   absolute_time_t now) {
     const output_color_t *color =
         &output_colors[request->test_color_index];
-    for (uint index = 0; index < OUTPUT_LED_COUNT; ++index) {
-        const uint32_t pixel =
-            index == request->test_led_index
-                ? recolored_grb(color, UINT8_MAX)
-                : 0u;
+    const uint16_t active_index =
+        cyclotron_physical_led_index(request->test_led_index);
+    for (uint index = 0; index < user_config.cyclotron_led_count; ++index) {
+        const uint32_t pixel = index == active_index
+                                   ? packed_cyclotron_pixel(
+                                         color->red, color->green,
+                                         color->blue, UINT8_MAX)
+                                   : 0u;
         pio_sm_put_blocking(pio, sm, pixel << 8);
     }
     cyclotron_test_active = true;
+    cyclotron_output_is_off = false;
     cyclotron_test_until =
         delayed_by_ms(now, request->test_duration_ms);
 }
 
 static void output_cyclotron_off(PIO pio, uint sm) {
-    for (uint index = 0; index < OUTPUT_LED_COUNT; ++index) {
+    if (cyclotron_output_is_off) {
+        return;
+    }
+    for (uint index = 0; index < user_config.cyclotron_led_count; ++index) {
         pio_sm_put_blocking(pio, sm, 0u);
     }
+    mark_cyclotron_tx_busy(get_absolute_time());
+    cyclotron_chase.output_valid = false;
+    cyclotron_output_is_off = true;
 }
 
 static void mark_cake_tx_busy(absolute_time_t started_at) {
@@ -1048,12 +1586,28 @@ static void queue_config_response(const char *format, ...) {
 static void queue_current_config(void) {
     queue_config_response(
         "PB84 CONFIG protocol=%u firmware=%s "
+        "cyclotron_led_style=%s cyclotron_led_count=%u "
+        "cyclotron_led_type=%s "
+        "cyclotron_color_order=%s cyclotron_bit_rate_khz=%u "
+        "cyclotron_timing_mode=%s cyclotron_speed_multiplier=%u "
+        "cyclotron_effect=%s cyclotron_rotation_ms=%u "
+        "cyclotron_reverse=%s "
         "cake_led_count=%u cake_led_type=%s cake_color_order=%s "
         "cake_bit_rate_khz=%u cake_red=%u cake_green=%u cake_blue=%u "
         "cake_reverse=%s cake_start_offset=%u outer_color_index=%u "
         "lid_bypass=%s cake_timing_mode=%s cake_speed_multiplier=%u "
         "cake_effect=%s cake_rotation_ms=%u preview=%s",
         CONFIG_PROTOCOL_VERSION, PROJECT_VERSION_STRING,
+        cyclotron_led_style_name(user_config.cyclotron_led_style),
+        user_config.cyclotron_led_count,
+        cake_led_type_name(user_config.cyclotron_led_type),
+        cake_color_order_name(user_config.cyclotron_color_order),
+        user_config.cyclotron_bit_rate_khz,
+        cake_timing_mode_name(user_config.cyclotron_timing_mode),
+        user_config.cyclotron_speed_multiplier,
+        cake_effect_name(user_config.cyclotron_effect),
+        user_config.cyclotron_rotation_ms,
+        user_config.cyclotron_reverse ? "true" : "false",
         user_config.cake_led_count,
         cake_led_type_name(user_config.cake_led_type),
         cake_color_order_name(user_config.cake_color_order),
@@ -1071,8 +1625,12 @@ static void queue_current_config(void) {
         preview_active ? "true" : "false");
 }
 
-static void apply_runtime_config(PIO pio, uint cake_sm,
+static void apply_runtime_config(PIO pio, uint cyclotron_sm, uint cake_sm,
                                  const user_config_t *config) {
+    output_cyclotron_off(pio, cyclotron_sm);
+    while (!time_reached(cyclotron_chase.tx_ready_at)) {
+        tight_loop_contents();
+    }
     output_cake_off(pio, cake_sm);
     while (!time_reached(cake_chase.tx_ready_at)) {
         tight_loop_contents();
@@ -1080,9 +1638,14 @@ static void apply_runtime_config(PIO pio, uint cake_sm,
     user_config = *config;
     memset(&cake_chase, 0, sizeof(cake_chase));
     ws2812_tx_set_bit_rate(
+        pio, cyclotron_sm,
+        (uint32_t)user_config.cyclotron_bit_rate_khz * 1000u);
+    ws2812_tx_set_bit_rate(
         pio, cake_sm, (uint32_t)user_config.cake_bit_rate_khz * 1000u);
     set_lid_output(lid_bypass_active());
     cake_test_active = false;
+    cyclotron_test_active = false;
+    memset(&cyclotron_chase, 0, sizeof(cyclotron_chase));
 }
 
 static void process_config_request(PIO pio, uint cyclotron_sm, uint cake_sm,
@@ -1124,7 +1687,7 @@ static void process_config_request(PIO pio, uint cyclotron_sm, uint cake_sm,
         if (!preview_active) {
             preview_saved_config = user_config;
         }
-        apply_runtime_config(pio, cake_sm, &request->config);
+        apply_runtime_config(pio, cyclotron_sm, cake_sm, &request->config);
         preview_active = true;
         queue_config_response("PB84 OK preview=true");
         return;
@@ -1133,7 +1696,7 @@ static void process_config_request(PIO pio, uint cyclotron_sm, uint cake_sm,
     if (request->kind == CONFIG_REQUEST_PREVIEW_STOP) {
         if (preview_active) {
             const user_config_t saved_config = preview_saved_config;
-            apply_runtime_config(pio, cake_sm, &saved_config);
+            apply_runtime_config(pio, cyclotron_sm, cake_sm, &saved_config);
             preview_active = false;
         }
         queue_config_response("PB84 OK preview=false");
@@ -1151,16 +1714,27 @@ static void process_config_request(PIO pio, uint cyclotron_sm, uint cake_sm,
     // Latch an all-off frame using the active frame length before applying
     // the saved configuration and restarting chase calibration.
     user_config = active_before_save;
-    apply_runtime_config(pio, cake_sm, &request->config);
+    apply_runtime_config(pio, cyclotron_sm, cake_sm, &request->config);
     preview_active = false;
     queue_config_response("PB84 OK saved=true");
 }
 
 static void output_all_red(PIO pio, uint sm, bool on) {
-    const uint32_t red_grb = on ? 0x00ff00u : 0u;
-    for (uint index = 0; index < OUTPUT_LED_COUNT; ++index) {
-        pio_sm_put_blocking(pio, sm, red_grb << 8);
+    for (uint index = 0; index < user_config.cyclotron_led_count; ++index) {
+        bool is_window_pixel = false;
+        for (uint window = 0; window < OUTPUT_LED_COUNT; ++window) {
+            if (cyclotron_physical_led_index(window) == index) {
+                is_window_pixel = true;
+                break;
+            }
+        }
+        const uint32_t pixel =
+            on && is_window_pixel
+                ? packed_cyclotron_pixel(255, 0, 0, UINT8_MAX)
+                : 0u;
+        pio_sm_put_blocking(pio, sm, pixel << 8);
     }
+    cyclotron_output_is_off = !on;
 }
 
 #if ENABLE_USB_DIAGNOSTICS
@@ -1173,9 +1747,10 @@ static void print_frame(const diagnostic_frame_t *frame) {
                                      : frame->lid_state == LID_STATE_CLOSED
                                            ? "Closed"
                                            : "Open";
-        printf("Frame %lu: 12 inputs -> 4 cyclotron LEDs + %u cake LEDs, "
+        printf("Frame %lu: 12 inputs -> %u cyclotron LEDs + %u cake LEDs, "
                "color %s, cake RGB(%u,%u,%u), lid %s%s\n",
                (unsigned long)frame->number,
+               user_config.cyclotron_led_count,
                user_config.cake_led_count,
                color->name,
                user_config.cake_red,
@@ -1183,7 +1758,8 @@ static void print_frame(const diagnostic_frame_t *frame) {
                user_config.cake_blue,
                lid_status,
                frame->truncated ? " (diagnostic buffer full)" : "");
-        for (uint output_index = 0; output_index < OUTPUT_LED_COUNT;
+        for (uint output_index = 0;
+             output_index < OUTPUT_LED_COUNT;
              ++output_index) {
             const uint8_t brightness = mapped_brightness(frame, output_index);
             if (brightness > 0) {
@@ -1436,6 +2012,14 @@ static void diagnostics_core(void) {
 int main(void) {
     // Restore saved preferences and bring up GPIO, multicore, and PIO hardware.
     set_sys_clock_khz(SYSTEM_CLOCK_KHZ, true);
+    gpio_init(WS2812_OUTPUT_PIN);
+    gpio_pull_down(WS2812_OUTPUT_PIN);
+    gpio_put(WS2812_OUTPUT_PIN, false);
+    gpio_set_dir(WS2812_OUTPUT_PIN, GPIO_OUT);
+    gpio_init(CAKE_OUTPUT_PIN);
+    gpio_pull_down(CAKE_OUTPUT_PIN);
+    gpio_put(CAKE_OUTPUT_PIN, false);
+    gpio_set_dir(CAKE_OUTPUT_PIN, GPIO_OUT);
     stdio_init_all();
     load_user_setting();
     lid_switch_init();
@@ -1459,9 +2043,13 @@ int main(void) {
 
     ws2812_rx_init(pio, rx_sm, rx_offset, WS2812_INPUT_PIN);
     ws2812_tx_init(pio, tx_sm, tx_offset, WS2812_OUTPUT_PIN,
-                   (uint32_t)WS2812_BIT_RATE);
+                   (uint32_t)user_config.cyclotron_bit_rate_khz * 1000u);
     ws2812_tx_init(pio, cake_tx_sm, tx_offset, CAKE_OUTPUT_PIN,
                    (uint32_t)user_config.cake_bit_rate_khz * 1000u);
+    // Clear every configured output immediately. Later shutdown clears are
+    // suppressed once the chain is known to be off, leaving the data pin low.
+    output_cyclotron_off(pio, tx_sm);
+    output_cake_off(pio, cake_tx_sm);
     wait_for_ws2812_reset(WS2812_INPUT_PIN);
     restart_ws2812_rx(pio, rx_sm, rx_offset);
     pio_rx_wake_init(pio, rx_sm);
@@ -1470,10 +2058,11 @@ int main(void) {
                            &idle_wake_timer);
 
 #if ENABLE_USB_DIAGNOSTICS
-    printf("%s v%s: GPIO %u -> GPIO %u (4 LEDs, %s), "
+    printf("%s v%s: GPIO %u -> GPIO %u (%u cyclotron LEDs, %s), "
            "GPIO %u (%u cake LEDs, RGB(%u,%u,%u))\n",
            PROJECT_NAME, PROJECT_VERSION_STRING,
            WS2812_INPUT_PIN, WS2812_OUTPUT_PIN,
+           user_config.cyclotron_led_count,
            output_colors[user_config.outer_color_index].name,
            CAKE_OUTPUT_PIN, user_config.cake_led_count,
            user_config.cake_red, user_config.cake_green,
@@ -1484,11 +2073,14 @@ int main(void) {
     // writes, and the visual confirmation sequence.
     uint32_t frame_number = 0;
     absolute_time_t last_pixel_time = get_absolute_time();
+    absolute_time_t next_idle_off =
+        delayed_by_ms(last_pixel_time, INPUT_IDLE_OFF_MS);
     absolute_time_t next_button_poll = get_absolute_time();
     absolute_time_t button_changed_at = get_absolute_time();
     absolute_time_t button_pressed_at = get_absolute_time();
     absolute_time_t next_lid_poll = get_absolute_time();
     absolute_time_t lid_changed_at = get_absolute_time();
+    absolute_time_t next_cyclotron_refresh = get_absolute_time();
     absolute_time_t next_cake_refresh = get_absolute_time();
     absolute_time_t color_save_at = at_the_end_of_time;
     absolute_time_t config_flash_at = at_the_end_of_time;
@@ -1533,6 +2125,10 @@ int main(void) {
                                                        : LID_STATE_OPEN;
             if (config_flash_phase == 0) {
                 const absolute_time_t frame_time = get_absolute_time();
+                if (capture_frame.pixel_count == HASBRO_INPUT_PIXELS) {
+                    next_idle_off =
+                        delayed_by_ms(frame_time, INPUT_IDLE_OFF_MS);
+                }
                 if (!cyclotron_test_active) {
                     output_cyclotron_frame(pio, tx_sm, &capture_frame);
                 }
@@ -1567,6 +2163,23 @@ int main(void) {
             cake_chase.output_valid = false;
         }
 
+        // WS2812 pixels latch their last state. If the source disappears
+        // without sending an all-off frame, latch one explicit zero frame.
+        // output_cyclotron_off() suppresses further zero-frame traffic until
+        // an illuminated frame has actually been sent.
+        if (config_flash_phase == 0 && time_reached(next_idle_off)) {
+            const absolute_time_t now = get_absolute_time();
+            next_idle_off = delayed_by_ms(now, INPUT_IDLE_OFF_MS);
+            if (!cyclotron_test_active) {
+                memset(&cyclotron_chase, 0, sizeof(cyclotron_chase));
+                output_cyclotron_off(pio, tx_sm);
+            }
+            if (!cake_test_active) {
+                memset(&cake_chase, 0, sizeof(cake_chase));
+                output_cake_off(pio, cake_tx_sm);
+            }
+        }
+
         // Refresh from the measured phase clock even when the source frame is
         // unchanged. TX readiness guarantees a reset-low latch between frames.
         if (config_flash_phase == 0 && !cake_test_active &&
@@ -1574,6 +2187,16 @@ int main(void) {
             const absolute_time_t now = get_absolute_time();
             next_cake_refresh = delayed_by_ms(now, CAKE_REFRESH_MS);
             refresh_cake_output(pio, cake_tx_sm, now);
+        }
+
+        if (config_flash_phase == 0 && !cyclotron_test_active &&
+            (user_config.cyclotron_timing_mode == CAKE_TIMING_FREE ||
+             user_config.cyclotron_speed_multiplier != 1 ||
+             user_config.cyclotron_effect != CAKE_EFFECT_SOLID) &&
+            time_reached(next_cyclotron_refresh)) {
+            const absolute_time_t now = get_absolute_time();
+            next_cyclotron_refresh = delayed_by_ms(now, CAKE_REFRESH_MS);
+            refresh_cyclotron_output(pio, tx_sm, now);
         }
 
         // Debounce the lid input and mirror it through the open-drain output.

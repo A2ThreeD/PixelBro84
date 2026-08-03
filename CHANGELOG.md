@@ -7,9 +7,20 @@ All notable project changes are documented here.
 - Added synchronized Cake chase speeds of 1×–5×, 10×, and 20×.
 - Added a free-running timing mode with a configurable 100–10,000 ms rotation.
 - Added solid, fade-out, four-pixel trail, and per-rotation color-shift effects.
-- Added non-persistent animation preview start/stop commands to protocol 2.
+- Added non-persistent animation preview start/stop commands to protocol 3.
 - Migrated version 1 saved configurations without changing their existing
   Cake behavior.
+- Added configurable cyclotron LED hardware settings, reverse direction, and
+  synchronized/free-running effects with input-gated full-brightness free mode.
+- Added selectable 4-pixel, 3-LED puck, 5-LED puck, and 9-LED puck cyclotron
+  styles; puck styles stream every pixel but illuminate only each puck's
+  center LED.
+- Added migration for version 2 and 3 settings and protocol 4 configuration
+  fields.
+- Retained protocol 1 compatibility so firmware 1.1 devices can continue to
+  use the current configurator before upgrading.
+- Added deterministic startup and shutdown clears for multi-pixel pucks and
+  suppressed repeated idle frames that could be misread on marginal links.
 
 ## [1.1.0] - 2026-07-29
 

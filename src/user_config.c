@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define CONFIG_PARSE_BUFFER_SIZE 512u
+#define CONFIG_PARSE_BUFFER_SIZE 1024u
 
 static void set_error(char *error, size_t error_size, const char *message) {
     if (error != NULL && error_size > 0) {
@@ -64,6 +64,17 @@ void user_config_set_defaults(user_config_t *config) {
         .cake_speed_multiplier = 1,
         .cake_effect = CAKE_EFFECT_SOLID,
         .reserved = {0, 0, 0},
+        .cyclotron_led_count = 4,
+        .cyclotron_bit_rate_khz = 800,
+        .cyclotron_rotation_ms = 1000,
+        .cyclotron_led_type = CAKE_LED_TYPE_WS2812B,
+        .cyclotron_color_order = CAKE_COLOR_ORDER_GRB,
+        .cyclotron_reverse = 0,
+        .cyclotron_timing_mode = CAKE_TIMING_SYNCED,
+        .cyclotron_speed_multiplier = 1,
+        .cyclotron_effect = CAKE_EFFECT_SOLID,
+        .cyclotron_led_style = CYCLOTRON_STYLE_SINGLE,
+        .cyclotron_reserved = {0, 0, 0},
     };
 }
 
@@ -86,6 +97,35 @@ const char *cake_effect_name(uint8_t effect) {
     return effect <= CAKE_EFFECT_COLOR_SHIFT ? names[effect] : "UNKNOWN";
 }
 
+uint16_t cyclotron_led_count_for_style(uint8_t style) {
+    static const uint16_t counts[] = {4, 12, 20, 36};
+    return style < (sizeof(counts) / sizeof(counts[0])) ? counts[style] : 0;
+}
+
+const char *cyclotron_led_style_name(uint8_t style) {
+    static const char *const names[] = {
+        "SINGLE", "PUCK3", "PUCK5", "PUCK9",
+    };
+    return style < (sizeof(names) / sizeof(names[0])) ? names[style]
+                                                      : "UNKNOWN";
+}
+
+static uint8_t cyclotron_led_style_from_count(uint16_t count) {
+    if (count > 0 && count <= CYCLOTRON_WINDOW_COUNT) {
+        return CYCLOTRON_STYLE_SINGLE;
+    }
+    switch (count) {
+        case 12:
+            return CYCLOTRON_STYLE_PUCK_3;
+        case 20:
+            return CYCLOTRON_STYLE_PUCK_5;
+        case 36:
+            return CYCLOTRON_STYLE_PUCK_9;
+        default:
+            return UINT8_MAX;
+    }
+}
+
 bool user_config_validate(const user_config_t *config,
                           uint8_t outer_color_count,
                           char *error,
@@ -97,6 +137,28 @@ bool user_config_validate(const user_config_t *config,
     if (config->cake_led_count == 0 ||
         config->cake_led_count > CAKE_LED_COUNT_MAX) {
         set_error(error, error_size, "cake_led_count must be 1 through 64");
+        return false;
+    }
+    if (config->cyclotron_led_style > CYCLOTRON_STYLE_PUCK_9) {
+        set_error(error, error_size, "unsupported cyclotron_led_style");
+        return false;
+    }
+    if (config->cyclotron_led_count !=
+        cyclotron_led_count_for_style(config->cyclotron_led_style)) {
+        set_error(error, error_size,
+                  "cyclotron_led_count does not match cyclotron_led_style");
+        return false;
+    }
+    if (config->cyclotron_bit_rate_khz != 400 &&
+        config->cyclotron_bit_rate_khz != 800) {
+        set_error(error, error_size,
+                  "cyclotron_bit_rate_khz must be 400 or 800");
+        return false;
+    }
+    if (config->cyclotron_rotation_ms < CAKE_ROTATION_MS_MIN ||
+        config->cyclotron_rotation_ms > CAKE_ROTATION_MS_MAX) {
+        set_error(error, error_size,
+                  "cyclotron_rotation_ms must be 100 through 10000");
         return false;
     }
     if (config->cake_bit_rate_khz != 400 &&
@@ -143,7 +205,29 @@ bool user_config_validate(const user_config_t *config,
         set_error(error, error_size, "unsupported cake_effect");
         return false;
     }
-    if (config->cake_reverse > 1 || config->lid_bypass > 1) {
+    if (config->cyclotron_led_type > CAKE_LED_TYPE_WS2811 ||
+        config->cyclotron_color_order > CAKE_COLOR_ORDER_RGB) {
+        set_error(error, error_size, "unsupported cyclotron LED format");
+        return false;
+    }
+    if (config->cyclotron_timing_mode > CAKE_TIMING_FREE) {
+        set_error(error, error_size, "unsupported cyclotron_timing_mode");
+        return false;
+    }
+    if (!((config->cyclotron_speed_multiplier >= 1 &&
+           config->cyclotron_speed_multiplier <= 5) ||
+          config->cyclotron_speed_multiplier == 10 ||
+          config->cyclotron_speed_multiplier == 20)) {
+        set_error(error, error_size,
+                  "cyclotron_speed_multiplier must be 1-5, 10, or 20");
+        return false;
+    }
+    if (config->cyclotron_effect > CAKE_EFFECT_COLOR_SHIFT) {
+        set_error(error, error_size, "unsupported cyclotron_effect");
+        return false;
+    }
+    if (config->cake_reverse > 1 || config->cyclotron_reverse > 1 ||
+        config->lid_bypass > 1) {
         set_error(error, error_size, "boolean setting must be true or false");
         return false;
     }
@@ -189,6 +273,18 @@ bool user_config_parse_update(const char *settings,
             parsed = parse_u16(value, &result->cake_bit_rate_khz);
         } else if (strcmp(key, "cake_start_offset") == 0) {
             parsed = parse_u16(value, &result->cake_start_offset);
+        } else if (strcmp(key, "cyclotron_led_count") == 0) {
+            uint16_t count = 0;
+            parsed = parse_u16(value, &count);
+            if (parsed) {
+                result->cyclotron_led_style =
+                    cyclotron_led_style_from_count(count);
+                result->cyclotron_led_count = count;
+            }
+        } else if (strcmp(key, "cyclotron_bit_rate_khz") == 0) {
+            parsed = parse_u16(value, &result->cyclotron_bit_rate_khz);
+        } else if (strcmp(key, "cyclotron_rotation_ms") == 0) {
+            parsed = parse_u16(value, &result->cyclotron_rotation_ms);
         } else if (strcmp(key, "cake_rotation_ms") == 0) {
             parsed = parse_u16(value, &result->cake_rotation_ms);
         } else if (strcmp(key, "outer_color_index") == 0) {
@@ -241,6 +337,58 @@ bool user_config_parse_update(const char *settings,
             } else {
                 parsed = false;
             }
+        } else if (strcmp(key, "cyclotron_led_type") == 0) {
+            if (strcmp(value, "WS2812B") == 0) {
+                result->cyclotron_led_type = CAKE_LED_TYPE_WS2812B;
+            } else if (strcmp(value, "WS2811") == 0) {
+                result->cyclotron_led_type = CAKE_LED_TYPE_WS2811;
+            } else {
+                parsed = false;
+            }
+        } else if (strcmp(key, "cyclotron_color_order") == 0) {
+            if (strcmp(value, "GRB") == 0) {
+                result->cyclotron_color_order = CAKE_COLOR_ORDER_GRB;
+            } else if (strcmp(value, "RGB") == 0) {
+                result->cyclotron_color_order = CAKE_COLOR_ORDER_RGB;
+            } else {
+                parsed = false;
+            }
+        } else if (strcmp(key, "cyclotron_reverse") == 0) {
+            parsed = parse_bool(value, &result->cyclotron_reverse);
+        } else if (strcmp(key, "cyclotron_timing_mode") == 0) {
+            if (strcmp(value, "SYNCED") == 0) {
+                result->cyclotron_timing_mode = CAKE_TIMING_SYNCED;
+            } else if (strcmp(value, "FREE") == 0) {
+                result->cyclotron_timing_mode = CAKE_TIMING_FREE;
+            } else {
+                parsed = false;
+            }
+        } else if (strcmp(key, "cyclotron_speed_multiplier") == 0) {
+            parsed = parse_u8(value, &result->cyclotron_speed_multiplier);
+        } else if (strcmp(key, "cyclotron_effect") == 0) {
+            if (strcmp(value, "SOLID") == 0) {
+                result->cyclotron_effect = CAKE_EFFECT_SOLID;
+            } else if (strcmp(value, "FADE") == 0) {
+                result->cyclotron_effect = CAKE_EFFECT_FADE;
+            } else if (strcmp(value, "TRAIL") == 0) {
+                result->cyclotron_effect = CAKE_EFFECT_TRAIL;
+            } else if (strcmp(value, "COLOR_SHIFT") == 0) {
+                result->cyclotron_effect = CAKE_EFFECT_COLOR_SHIFT;
+            } else {
+                parsed = false;
+            }
+        } else if (strcmp(key, "cyclotron_led_style") == 0) {
+            if (strcmp(value, "SINGLE") == 0) {
+                result->cyclotron_led_style = CYCLOTRON_STYLE_SINGLE;
+            } else if (strcmp(value, "PUCK3") == 0) {
+                result->cyclotron_led_style = CYCLOTRON_STYLE_PUCK_3;
+            } else if (strcmp(value, "PUCK5") == 0) {
+                result->cyclotron_led_style = CYCLOTRON_STYLE_PUCK_5;
+            } else if (strcmp(value, "PUCK9") == 0) {
+                result->cyclotron_led_style = CYCLOTRON_STYLE_PUCK_9;
+            } else {
+                parsed = false;
+            }
         } else {
             snprintf(error, error_size, "unknown setting: %s", key);
             return false;
@@ -252,5 +400,13 @@ bool user_config_parse_update(const char *settings,
         }
     }
 
+    // Older configurators may send a complete version 1, 2, or 3 update. Keep
+    // the new cyclotron fields from the base configuration and normalize the
+    // record to the current schema before validation and persistence.
+    if (result->version >= 1 && result->version < USER_CONFIG_VERSION) {
+        result->version = USER_CONFIG_VERSION;
+    }
+    result->cyclotron_led_count =
+        cyclotron_led_count_for_style(result->cyclotron_led_style);
     return user_config_validate(result, outer_color_count, error, error_size);
 }

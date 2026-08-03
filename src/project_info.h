@@ -39,6 +39,6 @@
 // License and release summary reported by the Pico binary metadata.
 #define PROJECT_LICENSE "PolyForm-Noncommercial-1.0.0"
 #define PROJECT_CHANGE_SUMMARY \
-    "Added configurable Cake LED speeds, timing, effects, and previews"
+    "Added configurable cyclotron and Cake LED animation controls"
 
 #endif

@@ -2,15 +2,17 @@
 
 | Project field | Value |
 | --- | --- |
-| Version | 1.1.0 |
-| Release date | July 29, 2026 |
+| Version | 1.2.0 |
+| Release date | August 3, 2026 |
 | Programmer | Aaron Morris |
 | Company | A2ThreeD |
 
 Firmware for a Waveshare (or clone) RP2040-Zero that receives the Hasbro
-cyclotron's 800 kHz WS2812 data stream and drives four replacement RGB WS2812B
-LEDs in a chosen color. It also drives a synchronized cyclotron cake string on
-GPIO27. Both outputs default to red.
+cyclotron's 800 kHz WS2812 data stream and drives a configurable four-window
+replacement cyclotron string in a chosen color. It supports four single
+pixels or 3-, 5-, and 9-LED pucks, illuminating one center pixel per window.
+It also drives a synchronized cyclotron cake string on GPIO27. Both outputs
+default to red.
 
 ## License
 
@@ -81,8 +83,16 @@ fade-out, four-pixel trail, and color-shift effects are available. Color shift
 starts from the standard color nearest the configured Cake color and advances
 through the five-color palette after each completed rotation.
 
-Cake length, controller type, color order, bitrate, RGB color, direction, start
-offset, timing, speed, and effect are runtime settings managed by the browser
+Cyclotron LED style, controller type, color order, bitrate, reverse direction,
+timing, speed, and effect are configurable as well. The available styles are
+four single pixels, 3-LED Haslab pucks, 5-LED pucks, and 9-LED pucks. Puck
+styles stream all pixels in each puck but illuminate only the middle pixel in
+each of the four windows, preserving the 1984 one-pixel-per-window behavior.
+In free-running mode the incoming cyclotron signal gates the animation: an
+active signal starts it and an all-off signal stops it, while the animation
+itself runs at full configured brightness.
+
+All LED hardware and animation settings are managed by the browser
 configurator.
 
 ## Cyclotron lid switch
@@ -169,8 +179,8 @@ The versioned text protocol is also usable from a terminal:
 ```text
 PB84 HELLO
 PB84 GET
-PB84 SET version=2 cake_timing_mode=SYNCED cake_speed_multiplier=2 cake_effect=TRAIL
-PB84 PREVIEW START version=2 cake_timing_mode=FREE cake_rotation_ms=1200 cake_effect=FADE
+PB84 SET version=4 cyclotron_led_style=PUCK3 cyclotron_timing_mode=SYNCED cyclotron_speed_multiplier=2 cyclotron_effect=TRAIL
+PB84 PREVIEW START version=4 cake_timing_mode=FREE cake_rotation_ms=1200 cake_effect=FADE
 PB84 PREVIEW STOP
 PB84 TEST led=1 red=255 green=0 blue=0 duration_ms=700
 PB84 TEST target=cyclotron led=1 color_index=0 duration_ms=700
@@ -178,7 +188,10 @@ PB84 TEST target=cyclotron led=1 color_index=0 duration_ms=700
 
 `SET` and `PREVIEW START` accept partial updates, validate the resulting
 complete configuration, and reply with either `PB84 OK` or a descriptive
-`PB84 ERROR`. Protocol 2 uses saved-configuration schema version 2.
+`PB84 ERROR`. Protocol 4 uses saved-configuration schema version 4 while
+accepting version 1, 2, and 3 updates for compatibility. Older protocol 3
+clients can continue to send `cyclotron_led_count=4` for the single-pixel
+style.
 
 ## Power Considerations
 
