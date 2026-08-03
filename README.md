@@ -31,6 +31,12 @@ See [NOTICE](NOTICE) for the required project notices,
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party license text,
 and [CHANGELOG.md](CHANGELOG.md) for version history.
 
+Development and maintenance documentation:
+
+- [Coordinated development guide](docs/DEVELOPMENT.md)
+- [USB protocol and compatibility](docs/PROTOCOL.md)
+- [Firmware release checklist](docs/RELEASING.md)
+
 Live capture showed that each factory cyclotron lens uses three of the 12 input
 addresses. The groups are 2-4, 5-7, 8-10, and 11-12 plus 1. Each group's
 center address (3, 6, 9, or 12) controls one output LED. Using the center
