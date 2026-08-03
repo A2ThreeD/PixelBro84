@@ -118,6 +118,32 @@ typedef struct {
         FLASH_PAGE_SIZE - 12 - sizeof(user_config_t)];
 } user_settings_record_t;
 
+// Firmware 1.0/1.1 used version 1 of the user configuration. Keep its exact
+// layout so an upgrade can retain the installed hardware and color settings.
+typedef struct {
+    uint16_t version;
+    uint16_t cake_led_count;
+    uint16_t cake_bit_rate_khz;
+    uint16_t cake_start_offset;
+    uint8_t outer_color_index;
+    uint8_t cake_led_type;
+    uint8_t cake_color_order;
+    uint8_t cake_red;
+    uint8_t cake_green;
+    uint8_t cake_blue;
+    uint8_t cake_reverse;
+    uint8_t lid_bypass;
+} user_config_v1_t;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t sequence;
+    user_config_v1_t config;
+    uint32_t checksum;
+    uint8_t padding[
+        FLASH_PAGE_SIZE - 12 - sizeof(user_config_v1_t)];
+} user_settings_record_v1_t;
+
 typedef struct {
     uint32_t flash_offset;
     bool erase_sector;
@@ -128,6 +154,8 @@ _Static_assert(sizeof(legacy_settings_record_t) == FLASH_PAGE_SIZE,
                "Legacy setting must occupy exactly one flash page");
 _Static_assert(sizeof(user_settings_record_t) == FLASH_PAGE_SIZE,
                "User setting must occupy exactly one flash page");
+_Static_assert(sizeof(user_settings_record_v1_t) == FLASH_PAGE_SIZE,
+               "Version 1 user setting must occupy exactly one flash page");
 
 static const output_color_t output_colors[] = {
     {255, 0, 0, "Red"},
@@ -153,20 +181,30 @@ typedef struct {
 
 typedef struct {
     absolute_time_t phase_started_at;
+    absolute_time_t free_started_at;
     absolute_time_t tx_ready_at;
     uint32_t phase_duration_us[OUTPUT_LED_COUNT];
     uint32_t fallback_duration_us;
     uint16_t output_led_index;
+    uint32_t sync_cycle_count;
+    uint32_t output_rotation;
     uint8_t current_phase;
     uint8_t valid_duration_mask;
     uint8_t brightness;
     uint8_t output_brightness;
+    uint8_t output_effect_level;
     bool initialized;
     bool phase_start_known;
     bool output_valid;
 } cake_chase_state_t;
 
-#define CONFIG_PROTOCOL_VERSION 1u
+typedef struct {
+    uint32_t rotation;
+    uint16_t logical_index;
+    uint8_t step_progress;
+} cake_animation_sample_t;
+
+#define CONFIG_PROTOCOL_VERSION 2u
 #define CONFIG_COMMAND_MAX 512u
 #define CONFIG_MESSAGE_MAX 512u
 #define CONFIG_QUEUE_DEPTH 4u
@@ -175,6 +213,8 @@ typedef enum {
     CONFIG_REQUEST_GET,
     CONFIG_REQUEST_SET,
     CONFIG_REQUEST_TEST,
+    CONFIG_REQUEST_PREVIEW_START,
+    CONFIG_REQUEST_PREVIEW_STOP,
 } config_request_kind_t;
 
 typedef enum {
@@ -214,6 +254,8 @@ static diagnostic_frame_t previous_serial_frame;
 static bool previous_serial_frame_valid;
 #endif
 static user_config_t user_config;
+static user_config_t preview_saved_config;
+static bool preview_active;
 static uint32_t settings_sequence;
 static uint settings_next_slot;
 static settings_flash_write_t settings_flash_write;
@@ -372,6 +414,21 @@ static uint32_t user_settings_checksum(uint32_t sequence,
     return hash ^ USER_SETTINGS_MAGIC;
 }
 
+static uint32_t user_settings_checksum_v1(
+    uint32_t sequence, const user_config_v1_t *config) {
+    uint32_t hash = 2166136261u;
+    const uint8_t *sequence_bytes = (const uint8_t *)&sequence;
+    const uint8_t *config_bytes = (const uint8_t *)config;
+
+    for (size_t index = 0; index < sizeof(sequence); ++index) {
+        hash = (hash ^ sequence_bytes[index]) * 16777619u;
+    }
+    for (size_t index = 0; index < sizeof(*config); ++index) {
+        hash = (hash ^ config_bytes[index]) * 16777619u;
+    }
+    return hash ^ USER_SETTINGS_MAGIC;
+}
+
 static bool user_settings_record_valid(
     const user_settings_record_t *record) {
     char error[1];
@@ -380,6 +437,40 @@ static bool user_settings_record_valid(
                                 error, sizeof(error)) &&
            record->checksum ==
                user_settings_checksum(record->sequence, &record->config);
+}
+
+static bool user_settings_record_v1_valid(
+    const user_settings_record_v1_t *record) {
+    const user_config_v1_t *config = &record->config;
+    return record->magic == USER_SETTINGS_MAGIC &&
+           config->version == 1u &&
+           config->cake_led_count > 0 &&
+           config->cake_led_count <= CAKE_LED_COUNT_MAX &&
+           (config->cake_bit_rate_khz == 400 ||
+            config->cake_bit_rate_khz == 800) &&
+           config->cake_start_offset < config->cake_led_count &&
+           config->outer_color_index < OUTPUT_COLOR_COUNT &&
+           config->cake_led_type <= CAKE_LED_TYPE_WS2811 &&
+           config->cake_color_order <= CAKE_COLOR_ORDER_RGB &&
+           config->cake_reverse <= 1 && config->lid_bypass <= 1 &&
+           record->checksum ==
+               user_settings_checksum_v1(record->sequence, config);
+}
+
+static void migrate_user_config_v1(const user_config_v1_t *old_config,
+                                   user_config_t *new_config) {
+    user_config_set_defaults(new_config);
+    new_config->cake_led_count = old_config->cake_led_count;
+    new_config->cake_bit_rate_khz = old_config->cake_bit_rate_khz;
+    new_config->cake_start_offset = old_config->cake_start_offset;
+    new_config->outer_color_index = old_config->outer_color_index;
+    new_config->cake_led_type = old_config->cake_led_type;
+    new_config->cake_color_order = old_config->cake_color_order;
+    new_config->cake_red = old_config->cake_red;
+    new_config->cake_green = old_config->cake_green;
+    new_config->cake_blue = old_config->cake_blue;
+    new_config->cake_reverse = old_config->cake_reverse;
+    new_config->lid_bypass = old_config->lid_bypass;
 }
 
 // Scan the flash journal for the newest valid record and the next free page.
@@ -406,6 +497,17 @@ static void load_user_setting(void) {
                 user_config = record->config;
                 settings_sequence = record->sequence;
                 found = true;
+            } else {
+                const user_settings_record_v1_t *old_record =
+                    (const user_settings_record_v1_t *)page;
+                if (user_settings_record_v1_valid(old_record) &&
+                    (!found ||
+                     old_record->sequence >= settings_sequence)) {
+                    migrate_user_config_v1(
+                        &old_record->config, &user_config);
+                    settings_sequence = old_record->sequence;
+                    found = true;
+                }
             }
         } else if (magic == COLOR_SETTINGS_MAGIC) {
             const legacy_settings_record_t *record =
@@ -585,37 +687,77 @@ static uint8_t brightest_cyclotron_phase(
     return brightest_phase;
 }
 
-static uint16_t cake_chase_led_index(absolute_time_t now) {
-    const uint8_t current_phase = cake_chase.current_phase;
-    uint32_t duration_us = cake_chase.fallback_duration_us;
-    if ((cake_chase.valid_duration_mask & (1u << current_phase)) != 0) {
-        duration_us = cake_chase.phase_duration_us[current_phase];
-    }
+static cake_animation_sample_t cake_chase_sample(absolute_time_t now) {
+    uint64_t rotation_progress_us = 0;
+    uint64_t rotation_duration_us = 0;
+    uint64_t completed_rotations = 0;
 
-    uint64_t elapsed_us = 0;
-    if (duration_us > 0) {
+    if (user_config.cake_timing_mode == CAKE_TIMING_FREE) {
+        rotation_duration_us =
+            (uint64_t)user_config.cake_rotation_ms * 1000u;
         const int64_t measured_us =
-            absolute_time_diff_us(cake_chase.phase_started_at, now);
-        if (measured_us > 0) {
-            elapsed_us = (uint64_t)measured_us;
+            absolute_time_diff_us(cake_chase.free_started_at, now);
+        const uint64_t elapsed_us =
+            measured_us > 0 ? (uint64_t)measured_us : 0u;
+        completed_rotations = elapsed_us / rotation_duration_us;
+        rotation_progress_us = elapsed_us % rotation_duration_us;
+    } else {
+        const uint8_t current_phase = cake_chase.current_phase;
+        uint32_t phase_duration_us = cake_chase.fallback_duration_us;
+        if ((cake_chase.valid_duration_mask & (1u << current_phase)) != 0) {
+            phase_duration_us =
+                cake_chase.phase_duration_us[current_phase];
         }
-        if (elapsed_us >= duration_us) {
-            elapsed_us = duration_us - 1u;
+
+        uint64_t elapsed_us = 0;
+        if (phase_duration_us > 0) {
+            const int64_t measured_us =
+                absolute_time_diff_us(cake_chase.phase_started_at, now);
+            if (measured_us > 0) {
+                elapsed_us = (uint64_t)measured_us;
+            }
+            if (elapsed_us >= phase_duration_us) {
+                elapsed_us = phase_duration_us - 1u;
+            }
         }
+
+        rotation_duration_us =
+            (uint64_t)OUTPUT_LED_COUNT * phase_duration_us;
+        if (rotation_duration_us == 0) {
+            const uint16_t logical_index =
+                (uint16_t)(((uint32_t)current_phase *
+                            user_config.cake_led_count) /
+                           OUTPUT_LED_COUNT);
+            return (cake_animation_sample_t){
+                .rotation = cake_chase.sync_cycle_count *
+                            user_config.cake_speed_multiplier,
+                .logical_index = logical_index,
+                .step_progress = 0,
+            };
+        }
+
+        const uint64_t outer_progress_us =
+            (uint64_t)current_phase * phase_duration_us + elapsed_us;
+        const uint64_t scaled_progress_us =
+            outer_progress_us * user_config.cake_speed_multiplier;
+        completed_rotations =
+            (uint64_t)cake_chase.sync_cycle_count *
+                user_config.cake_speed_multiplier +
+            scaled_progress_us / rotation_duration_us;
+        rotation_progress_us =
+            scaled_progress_us % rotation_duration_us;
     }
 
-    // Each outer phase owns one quarter of the cake. The next outer
-    // transition hard-aligns the following quarter and eliminates drift.
-    const uint64_t phase_progress =
-        (uint64_t)current_phase * duration_us + elapsed_us;
-    const uint64_t phase_scale =
-        (uint64_t)OUTPUT_LED_COUNT * duration_us;
-    return duration_us == 0
-               ? (uint16_t)(((uint32_t)current_phase *
-                             user_config.cake_led_count) /
-                            OUTPUT_LED_COUNT)
-               : (uint16_t)((phase_progress *
-                             user_config.cake_led_count) / phase_scale);
+    const uint64_t pixel_progress =
+        rotation_progress_us * user_config.cake_led_count;
+    return (cake_animation_sample_t){
+        .rotation = (uint32_t)completed_rotations,
+        .logical_index =
+            (uint16_t)(pixel_progress / rotation_duration_us),
+        .step_progress = (uint8_t)(
+            ((pixel_progress % rotation_duration_us) * 255u) /
+            rotation_duration_us),
+    };
 }
 
 static uint16_t cake_physical_led_index(uint16_t logical_index) {
@@ -646,7 +788,11 @@ static void update_cake_chase(diagnostic_frame_t *frame,
         cake_chase.initialized = true;
         cake_chase.current_phase = phase;
         cake_chase.phase_started_at = now;
+        cake_chase.free_started_at = now;
     } else if (brightness > 0 && phase != cake_chase.current_phase) {
+        if (phase < cake_chase.current_phase) {
+            ++cake_chase.sync_cycle_count;
+        }
         const int64_t measured_us =
             absolute_time_diff_us(cake_chase.phase_started_at, now);
 
@@ -670,7 +816,7 @@ static void update_cake_chase(diagnostic_frame_t *frame,
 
     cake_chase.brightness = brightness;
     frame->cake_led_index =
-        cake_physical_led_index(cake_chase_led_index(now));
+        cake_physical_led_index(cake_chase_sample(now).logical_index);
     frame->cake_brightness = brightness;
 }
 
@@ -693,11 +839,12 @@ static uint32_t packed_cake_pixel(uint8_t red, uint8_t green,
            blue;
 }
 
-static uint32_t recolored_cake_pixel(uint8_t brightness) {
+static uint32_t recolored_cake_pixel(uint8_t red, uint8_t green,
+                                     uint8_t blue, uint8_t brightness) {
     return packed_cake_pixel(
-        scale_channel(user_config.cake_red, brightness),
-        scale_channel(user_config.cake_green, brightness),
-        scale_channel(user_config.cake_blue, brightness));
+        scale_channel(red, brightness),
+        scale_channel(green, brightness),
+        scale_channel(blue, brightness));
 }
 
 // Emit one completed source frame to the four outer cyclotron LEDs.
@@ -753,29 +900,91 @@ static void refresh_cake_output(PIO pio, uint sm, absolute_time_t now) {
         return;
     }
 
+    const cake_animation_sample_t sample = cake_chase_sample(now);
     const uint16_t active_index =
-        cake_physical_led_index(cake_chase_led_index(now));
+        cake_physical_led_index(sample.logical_index);
+    const uint8_t effect_level =
+        user_config.cake_effect == CAKE_EFFECT_FADE
+            ? sample.step_progress
+            : 0;
+    const uint32_t rendered_rotation =
+        user_config.cake_effect == CAKE_EFFECT_COLOR_SHIFT
+            ? sample.rotation
+            : 0;
     if (cake_chase.output_valid &&
         active_index == cake_chase.output_led_index &&
-        cake_chase.brightness == cake_chase.output_brightness) {
+        cake_chase.brightness == cake_chase.output_brightness &&
+        effect_level == cake_chase.output_effect_level &&
+        rendered_rotation == cake_chase.output_rotation) {
         return;
     }
 
-    // Every frame contains exactly one nonzero pixel. Do not start another
-    // frame until the previous 12 pixels and reset-low interval have elapsed.
+    uint8_t red = user_config.cake_red;
+    uint8_t green = user_config.cake_green;
+    uint8_t blue = user_config.cake_blue;
+    if (user_config.cake_effect == CAKE_EFFECT_COLOR_SHIFT) {
+        uint8_t closest_index = 0;
+        uint32_t closest_distance = UINT32_MAX;
+        for (uint8_t index = 0; index < OUTPUT_COLOR_COUNT; ++index) {
+            const int32_t red_delta =
+                (int32_t)output_colors[index].red - user_config.cake_red;
+            const int32_t green_delta =
+                (int32_t)output_colors[index].green - user_config.cake_green;
+            const int32_t blue_delta =
+                (int32_t)output_colors[index].blue - user_config.cake_blue;
+            const uint32_t distance =
+                (uint32_t)(red_delta * red_delta +
+                           green_delta * green_delta +
+                           blue_delta * blue_delta);
+            if (distance < closest_distance) {
+                closest_distance = distance;
+                closest_index = index;
+            }
+        }
+        const output_color_t *color = &output_colors[
+            (closest_index + sample.rotation) % OUTPUT_COLOR_COUNT];
+        red = color->red;
+        green = color->green;
+        blue = color->blue;
+    }
+
+    static const uint8_t trail_levels[] = {255, 144, 72, 32};
     for (uint cake_index = 0;
          cake_index < user_config.cake_led_count;
          ++cake_index) {
+        uint8_t effect_brightness = 0;
+        if (user_config.cake_effect == CAKE_EFFECT_TRAIL) {
+            const uint8_t trail_length =
+                user_config.cake_led_count < 4
+                    ? (uint8_t)user_config.cake_led_count
+                    : 4;
+            for (uint8_t distance = 0; distance < trail_length; ++distance) {
+                const uint16_t logical_index = (uint16_t)(
+                    (sample.logical_index + user_config.cake_led_count -
+                     distance) % user_config.cake_led_count);
+                if (cake_index == cake_physical_led_index(logical_index)) {
+                    effect_brightness = trail_levels[distance];
+                    break;
+                }
+            }
+        } else if (cake_index == active_index) {
+            effect_brightness =
+                user_config.cake_effect == CAKE_EFFECT_FADE
+                    ? (uint8_t)(255u - sample.step_progress)
+                    : 255u;
+        }
         const uint8_t brightness =
-            cake_index == active_index ? cake_chase.brightness : 0;
+            scale_channel(cake_chase.brightness, effect_brightness);
         pio_sm_put_blocking(
             pio, sm,
-            recolored_cake_pixel(brightness) << 8);
+            recolored_cake_pixel(red, green, blue, brightness) << 8);
     }
 
     mark_cake_tx_busy(now);
     cake_chase.output_led_index = active_index;
     cake_chase.output_brightness = cake_chase.brightness;
+    cake_chase.output_effect_level = effect_level;
+    cake_chase.output_rotation = rendered_rotation;
     cake_chase.output_valid = true;
 }
 
@@ -842,7 +1051,8 @@ static void queue_current_config(void) {
         "cake_led_count=%u cake_led_type=%s cake_color_order=%s "
         "cake_bit_rate_khz=%u cake_red=%u cake_green=%u cake_blue=%u "
         "cake_reverse=%s cake_start_offset=%u outer_color_index=%u "
-        "lid_bypass=%s",
+        "lid_bypass=%s cake_timing_mode=%s cake_speed_multiplier=%u "
+        "cake_effect=%s cake_rotation_ms=%u preview=%s",
         CONFIG_PROTOCOL_VERSION, PROJECT_VERSION_STRING,
         user_config.cake_led_count,
         cake_led_type_name(user_config.cake_led_type),
@@ -853,7 +1063,26 @@ static void queue_current_config(void) {
         user_config.cake_reverse ? "true" : "false",
         user_config.cake_start_offset,
         user_config.outer_color_index,
-        user_config.lid_bypass ? "true" : "false");
+        user_config.lid_bypass ? "true" : "false",
+        cake_timing_mode_name(user_config.cake_timing_mode),
+        user_config.cake_speed_multiplier,
+        cake_effect_name(user_config.cake_effect),
+        user_config.cake_rotation_ms,
+        preview_active ? "true" : "false");
+}
+
+static void apply_runtime_config(PIO pio, uint cake_sm,
+                                 const user_config_t *config) {
+    output_cake_off(pio, cake_sm);
+    while (!time_reached(cake_chase.tx_ready_at)) {
+        tight_loop_contents();
+    }
+    user_config = *config;
+    memset(&cake_chase, 0, sizeof(cake_chase));
+    ws2812_tx_set_bit_rate(
+        pio, cake_sm, (uint32_t)user_config.cake_bit_rate_khz * 1000u);
+    set_lid_output(lid_bypass_active());
+    cake_test_active = false;
 }
 
 static void process_config_request(PIO pio, uint cyclotron_sm, uint cake_sm,
@@ -891,27 +1120,39 @@ static void process_config_request(PIO pio, uint cyclotron_sm, uint cake_sm,
         return;
     }
 
-    const user_config_t previous = user_config;
+    if (request->kind == CONFIG_REQUEST_PREVIEW_START) {
+        if (!preview_active) {
+            preview_saved_config = user_config;
+        }
+        apply_runtime_config(pio, cake_sm, &request->config);
+        preview_active = true;
+        queue_config_response("PB84 OK preview=true");
+        return;
+    }
+
+    if (request->kind == CONFIG_REQUEST_PREVIEW_STOP) {
+        if (preview_active) {
+            const user_config_t saved_config = preview_saved_config;
+            apply_runtime_config(pio, cake_sm, &saved_config);
+            preview_active = false;
+        }
+        queue_config_response("PB84 OK preview=false");
+        return;
+    }
+
+    const user_config_t active_before_save = user_config;
     user_config = request->config;
     if (!save_user_setting()) {
-        user_config = previous;
+        user_config = active_before_save;
         queue_config_response("PB84 ERROR unable to save configuration");
         return;
     }
 
-    // Latch an all-off frame using the old frame length before applying the
-    // new timing and count, then restart the chase calibration.
-    user_config = previous;
-    output_cake_off(pio, cake_sm);
-    while (!time_reached(cake_chase.tx_ready_at)) {
-        tight_loop_contents();
-    }
-    user_config = request->config;
-    memset(&cake_chase, 0, sizeof(cake_chase));
-    ws2812_tx_set_bit_rate(
-        pio, cake_sm, (uint32_t)user_config.cake_bit_rate_khz * 1000u);
-    set_lid_output(lid_bypass_active());
-    cake_test_active = false;
+    // Latch an all-off frame using the active frame length before applying
+    // the saved configuration and restarting chase calibration.
+    user_config = active_before_save;
+    apply_runtime_config(pio, cake_sm, &request->config);
+    preview_active = false;
     queue_config_response("PB84 OK saved=true");
 }
 
@@ -1040,6 +1281,31 @@ static void handle_config_command(char *line) {
         const user_config_t base = user_config;
         if (!user_config_parse_update(
                 line + 9, &base, OUTPUT_COLOR_COUNT,
+                &request.config, error, sizeof(error))) {
+            printf("PB84 ERROR %s\r\n", error);
+            fflush(stdout);
+            return;
+        }
+        submit_config_request(&request);
+        return;
+    }
+
+    if (strcmp(line, "PB84 PREVIEW STOP") == 0) {
+        const config_request_t request = {
+            .kind = CONFIG_REQUEST_PREVIEW_STOP,
+        };
+        submit_config_request(&request);
+        return;
+    }
+
+    if (strncmp(line, "PB84 PREVIEW START ", 19) == 0) {
+        config_request_t request = {
+            .kind = CONFIG_REQUEST_PREVIEW_START,
+        };
+        char error[96];
+        const user_config_t base = user_config;
+        if (!user_config_parse_update(
+                line + 19, &base, OUTPUT_COLOR_COUNT,
                 &request.config, error, sizeof(error))) {
             printf("PB84 ERROR %s\r\n", error);
             fflush(stdout);

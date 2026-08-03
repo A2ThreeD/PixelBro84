@@ -2,6 +2,15 @@
 
 All notable project changes are documented here.
 
+## [1.2.0] - 2026-08-03
+
+- Added synchronized Cake chase speeds of 1×–5×, 10×, and 20×.
+- Added a free-running timing mode with a configurable 100–10,000 ms rotation.
+- Added solid, fade-out, four-pixel trail, and per-rotation color-shift effects.
+- Added non-persistent animation preview start/stop commands to protocol 2.
+- Migrated version 1 saved configurations without changing their existing
+  Cake behavior.
+
 ## [1.1.0] - 2026-07-29
 
 - Added browser-configurator testing for each of the four cyclotron LEDs.

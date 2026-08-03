@@ -51,6 +51,7 @@ void user_config_set_defaults(user_config_t *config) {
         .cake_led_count = 12,
         .cake_bit_rate_khz = 800,
         .cake_start_offset = 0,
+        .cake_rotation_ms = 1000,
         .outer_color_index = 0,
         .cake_led_type = CAKE_LED_TYPE_WS2812B,
         .cake_color_order = CAKE_COLOR_ORDER_GRB,
@@ -59,6 +60,10 @@ void user_config_set_defaults(user_config_t *config) {
         .cake_blue = 0,
         .cake_reverse = 0,
         .lid_bypass = 0,
+        .cake_timing_mode = CAKE_TIMING_SYNCED,
+        .cake_speed_multiplier = 1,
+        .cake_effect = CAKE_EFFECT_SOLID,
+        .reserved = {0, 0, 0},
     };
 }
 
@@ -68,6 +73,17 @@ const char *cake_led_type_name(uint8_t type) {
 
 const char *cake_color_order_name(uint8_t order) {
     return order == CAKE_COLOR_ORDER_RGB ? "RGB" : "GRB";
+}
+
+const char *cake_timing_mode_name(uint8_t mode) {
+    return mode == CAKE_TIMING_FREE ? "FREE" : "SYNCED";
+}
+
+const char *cake_effect_name(uint8_t effect) {
+    static const char *const names[] = {
+        "SOLID", "FADE", "TRAIL", "COLOR_SHIFT",
+    };
+    return effect <= CAKE_EFFECT_COLOR_SHIFT ? names[effect] : "UNKNOWN";
 }
 
 bool user_config_validate(const user_config_t *config,
@@ -93,6 +109,12 @@ bool user_config_validate(const user_config_t *config,
                   "cake_start_offset must be less than cake_led_count");
         return false;
     }
+    if (config->cake_rotation_ms < CAKE_ROTATION_MS_MIN ||
+        config->cake_rotation_ms > CAKE_ROTATION_MS_MAX) {
+        set_error(error, error_size,
+                  "cake_rotation_ms must be 100 through 10000");
+        return false;
+    }
     if (config->outer_color_index >= outer_color_count) {
         set_error(error, error_size, "outer_color_index is out of range");
         return false;
@@ -103,6 +125,22 @@ bool user_config_validate(const user_config_t *config,
     }
     if (config->cake_color_order > CAKE_COLOR_ORDER_RGB) {
         set_error(error, error_size, "unsupported cake_color_order");
+        return false;
+    }
+    if (config->cake_timing_mode > CAKE_TIMING_FREE) {
+        set_error(error, error_size, "unsupported cake_timing_mode");
+        return false;
+    }
+    if (!((config->cake_speed_multiplier >= 1 &&
+           config->cake_speed_multiplier <= 5) ||
+          config->cake_speed_multiplier == 10 ||
+          config->cake_speed_multiplier == 20)) {
+        set_error(error, error_size,
+                  "cake_speed_multiplier must be 1-5, 10, or 20");
+        return false;
+    }
+    if (config->cake_effect > CAKE_EFFECT_COLOR_SHIFT) {
+        set_error(error, error_size, "unsupported cake_effect");
         return false;
     }
     if (config->cake_reverse > 1 || config->lid_bypass > 1) {
@@ -151,6 +189,8 @@ bool user_config_parse_update(const char *settings,
             parsed = parse_u16(value, &result->cake_bit_rate_khz);
         } else if (strcmp(key, "cake_start_offset") == 0) {
             parsed = parse_u16(value, &result->cake_start_offset);
+        } else if (strcmp(key, "cake_rotation_ms") == 0) {
+            parsed = parse_u16(value, &result->cake_rotation_ms);
         } else if (strcmp(key, "outer_color_index") == 0) {
             parsed = parse_u8(value, &result->outer_color_index);
         } else if (strcmp(key, "cake_red") == 0) {
@@ -176,6 +216,28 @@ bool user_config_parse_update(const char *settings,
                 result->cake_color_order = CAKE_COLOR_ORDER_GRB;
             } else if (strcmp(value, "RGB") == 0) {
                 result->cake_color_order = CAKE_COLOR_ORDER_RGB;
+            } else {
+                parsed = false;
+            }
+        } else if (strcmp(key, "cake_timing_mode") == 0) {
+            if (strcmp(value, "SYNCED") == 0) {
+                result->cake_timing_mode = CAKE_TIMING_SYNCED;
+            } else if (strcmp(value, "FREE") == 0) {
+                result->cake_timing_mode = CAKE_TIMING_FREE;
+            } else {
+                parsed = false;
+            }
+        } else if (strcmp(key, "cake_speed_multiplier") == 0) {
+            parsed = parse_u8(value, &result->cake_speed_multiplier);
+        } else if (strcmp(key, "cake_effect") == 0) {
+            if (strcmp(value, "SOLID") == 0) {
+                result->cake_effect = CAKE_EFFECT_SOLID;
+            } else if (strcmp(value, "FADE") == 0) {
+                result->cake_effect = CAKE_EFFECT_FADE;
+            } else if (strcmp(value, "TRAIL") == 0) {
+                result->cake_effect = CAKE_EFFECT_TRAIL;
+            } else if (strcmp(value, "COLOR_SHIFT") == 0) {
+                result->cake_effect = CAKE_EFFECT_COLOR_SHIFT;
             } else {
                 parsed = false;
             }

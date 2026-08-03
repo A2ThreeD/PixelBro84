@@ -65,18 +65,25 @@ logic-level shifting and series-resistor practices described for GPIO3.
 
 ## Cyclotron cake
 
-The cake defaults to 12 red WS2812 LEDs. A single lit LED chases continuously
-from cake LED 1 through the end of the string, then wraps back to LED 1. The
-firmware measures the time between outer cyclotron transitions and divides each
-interval across one quarter of the cake. Every outer transition is a hard sync
-point, so the cake follows speed changes without accumulating timer drift.
+The cake defaults to 12 red WS2812 LEDs using the solid, synchronized 1× chase.
+A lit LED moves continuously from cake LED 1 through the end of the string,
+then wraps back to LED 1. Synchronized mode measures the time between outer
+cyclotron transitions. Every outer transition is a hard sync point, so 1×–5×,
+10×, and 20× Cake speeds follow source speed changes without accumulating
+timer drift.
 
 For a 12-LED cake, LEDs 1, 4, 7, and 10 align with outer cyclotron LEDs 1, 2,
 3, and 4. The first complete outer interval after startup calibrates the chase
 speed. Other cake lengths are divided evenly across the same four phases.
 
-Cake length, controller type, color order, bitrate, RGB color, direction, and
-start offset are runtime settings managed by the browser configurator.
+The Cake can instead run on its own 100–10,000 ms full-rotation clock. Solid,
+fade-out, four-pixel trail, and color-shift effects are available. Color shift
+starts from the standard color nearest the configured Cake color and advances
+through the five-color palette after each completed rotation.
+
+Cake length, controller type, color order, bitrate, RGB color, direction, start
+offset, timing, speed, and effect are runtime settings managed by the browser
+configurator.
 
 ## Cyclotron lid switch
 
@@ -138,17 +145,20 @@ Hold BOOT for two seconds while running to toggle the cyclotron lid bypass. All
 four output LEDs flash red together twice to confirm the configuration change.
 
 All configuration values are stored in a wear-leveled log in the final 4 KB
-flash sector and restored when the pack powers on. Firmware 1.0.0 migrates
-existing color and lid-bypass records automatically. Holding BOOT while
-powering or resetting the board still enters the RP2040 UF2 bootloader.
+flash sector and restored when the pack powers on. Firmware 1.2.0 migrates
+existing version 1 configurations and earlier color/lid-bypass records
+automatically. Holding BOOT while powering or resetting the board still enters
+the RP2040 UF2 bootloader.
 
 ## Browser configurator
 
 Production firmware exposes a USB CDC configuration port. Open the standalone
 PixelBro84 Configurator in a Web Serial-capable desktop browser, connect the
-controller, adjust settings, test the four cyclotron LEDs or individual cake
-LEDs, and select **Save to PixelBro84**. The device validates the complete
-configuration before appending it to the flash journal.
+controller, adjust settings, preview the selected Cake animation, test the four
+cyclotron LEDs or individual Cake LEDs, and select **Save to PixelBro84**. A
+preview runs without writing flash; stopping it restores the saved settings.
+The device validates the complete configuration before appending it to the
+flash journal.
 
 The configurator source is maintained in the sibling
 `PixelBro84-Configurator` project. USB CDC uses 115200 baud as a conventional
@@ -159,13 +169,16 @@ The versioned text protocol is also usable from a terminal:
 ```text
 PB84 HELLO
 PB84 GET
-PB84 SET version=1 cake_led_count=12 cake_led_type=WS2812B cake_color_order=GRB cake_bit_rate_khz=800
+PB84 SET version=2 cake_timing_mode=SYNCED cake_speed_multiplier=2 cake_effect=TRAIL
+PB84 PREVIEW START version=2 cake_timing_mode=FREE cake_rotation_ms=1200 cake_effect=FADE
+PB84 PREVIEW STOP
 PB84 TEST led=1 red=255 green=0 blue=0 duration_ms=700
 PB84 TEST target=cyclotron led=1 color_index=0 duration_ms=700
 ```
 
-`SET` accepts partial updates, validates the resulting complete configuration,
-and replies with either `PB84 OK` or a descriptive `PB84 ERROR`.
+`SET` and `PREVIEW START` accept partial updates, validate the resulting
+complete configuration, and reply with either `PB84 OK` or a descriptive
+`PB84 ERROR`. Protocol 2 uses saved-configuration schema version 2.
 
 ## Power Considerations
 
