@@ -383,11 +383,14 @@ enum {
 };
 
 // Wake-up support lets the main core sleep between incoming pixels and polls.
+// Keep the repeating alarm active; its interrupt wakes the main core for
+// button, lid, preview, and idle-output deadlines.
 static bool idle_wake_timer_callback(repeating_timer_t *timer) {
     (void)timer;
     return true;
 }
 
+// Disable the one-shot PIO RX wake source after incoming data wakes core 0.
 static void pio_rx_wake_irq_handler(void) {
     pio_set_irq0_source_enabled(
         rx_wake_pio,
@@ -395,6 +398,7 @@ static void pio_rx_wake_irq_handler(void) {
         false);
 }
 
+// Install the PIO RX interrupt used to wake the main loop from __wfi().
 static void pio_rx_wake_init(PIO pio, uint sm) {
     rx_wake_pio = pio;
     rx_wake_sm = sm;
@@ -404,6 +408,8 @@ static void pio_rx_wake_init(PIO pio, uint sm) {
     irq_set_enabled(PIO_IRQ_NUM(pio, 0), true);
 }
 
+// Sleep atomically until either a complete input pixel or the poll timer
+// arrives, avoiding the race between checking the FIFO and entering __wfi().
 static void sleep_until_input_or_timer(PIO pio, uint sm) {
     const uint32_t flags = save_and_disable_interrupts();
     pio_set_irq0_source_enabled(
@@ -423,10 +429,12 @@ static void set_lid_output(bool pull_low) {
     gpio_set_dir(LID_OUTPUT_PIN, pull_low ? GPIO_OUT : GPIO_IN);
 }
 
+// Combine the compile-time override with the user's saved bypass preference.
 static bool lid_bypass_active(void) {
     return LID_DETECTION_BYPASS || user_config.lid_bypass != 0;
 }
 
+// Initialize the lid sense input and its open-drain-style mirrored output.
 static void lid_switch_init(void) {
     gpio_init(LID_OUTPUT_PIN);
     gpio_disable_pulls(LID_OUTPUT_PIN);
@@ -464,6 +472,7 @@ static bool __no_inline_not_in_flash_func(read_bootsel_pressed_raw)(void) {
     return pressed;
 }
 
+// Coordinate both cores around the RAM-only QSPI/BOOTSEL sampling routine.
 static bool read_bootsel_pressed(void) {
     multicore_lockout_start_blocking();
     const bool pressed = read_bootsel_pressed_raw();
@@ -473,11 +482,13 @@ static bool read_bootsel_pressed(void) {
 
 // Settings validation accepts the previous color-only journal format so an
 // upgrade preserves the user's existing outer color and lid-bypass choice.
+// Reproduce the checksum used by the earliest color-only journal records.
 static uint32_t legacy_color_settings_checksum(uint32_t sequence,
                                                uint8_t color_index) {
     return COLOR_SETTINGS_MAGIC ^ sequence ^ color_index ^ 0xa5c35a3cu;
 }
 
+// Extend the legacy checksum with the later lid-bypass field.
 static uint32_t color_settings_checksum(uint32_t sequence,
                                         uint8_t color_index,
                                         bool bypass_enabled) {
@@ -485,6 +496,8 @@ static uint32_t color_settings_checksum(uint32_t sequence,
            ((uint32_t)bypass_enabled << 24) ^ 0x19b40000u;
 }
 
+// Validate either legacy record variant and report whether it predates the
+// lid-bypass field.
 static bool legacy_settings_record_valid(
     const legacy_settings_record_t *record, bool *color_only) {
     const bool common_valid =
@@ -512,6 +525,7 @@ static bool legacy_settings_record_valid(
                                        record->bypass_enabled != 0);
 }
 
+// Hash the current saved-schema bytes and journal sequence with FNV-1a.
 static uint32_t user_settings_checksum(uint32_t sequence,
                                        const user_config_t *config) {
     uint32_t hash = 2166136261u;
@@ -527,6 +541,7 @@ static uint32_t user_settings_checksum(uint32_t sequence,
     return hash ^ USER_SETTINGS_MAGIC;
 }
 
+// Reproduce schema-1 checksums over that version's exact packed layout.
 static uint32_t user_settings_checksum_v1(
     uint32_t sequence, const user_config_v1_t *config) {
     uint32_t hash = 2166136261u;
@@ -542,6 +557,7 @@ static uint32_t user_settings_checksum_v1(
     return hash ^ USER_SETTINGS_MAGIC;
 }
 
+// Reproduce schema-2 checksums over that version's exact packed layout.
 static uint32_t user_settings_checksum_v2(
     uint32_t sequence, const user_config_v2_t *config) {
     uint32_t hash = 2166136261u;
@@ -557,6 +573,7 @@ static uint32_t user_settings_checksum_v2(
     return hash ^ USER_SETTINGS_MAGIC;
 }
 
+// Reproduce schema-3 checksums over that version's exact packed layout.
 static uint32_t user_settings_checksum_v3(
     uint32_t sequence, const user_config_v3_t *config) {
     uint32_t hash = 2166136261u;
@@ -572,6 +589,7 @@ static uint32_t user_settings_checksum_v3(
     return hash ^ USER_SETTINGS_MAGIC;
 }
 
+// Validate a current-schema journal page before accepting it at boot.
 static bool user_settings_record_valid(
     const user_settings_record_t *record) {
     char error[1];
@@ -582,6 +600,7 @@ static bool user_settings_record_valid(
                user_settings_checksum(record->sequence, &record->config);
 }
 
+// Validate a schema-1 page without reinterpreting it as the current struct.
 static bool user_settings_record_v1_valid(
     const user_settings_record_v1_t *record) {
     const user_config_v1_t *config = &record->config;
@@ -600,6 +619,7 @@ static bool user_settings_record_v1_valid(
                user_settings_checksum_v1(record->sequence, config);
 }
 
+// Validate a schema-2 page without reinterpreting it as the current struct.
 static bool user_settings_record_v2_valid(
     const user_settings_record_v2_t *record) {
     const user_config_v2_t *config = &record->config;
@@ -626,6 +646,7 @@ static bool user_settings_record_v2_valid(
                user_settings_checksum_v2(record->sequence, config);
 }
 
+// Validate a schema-3 page without reinterpreting it as the current struct.
 static bool user_settings_record_v3_valid(
     const user_settings_record_v3_t *record) {
     const user_config_v3_t *config = &record->config;
@@ -667,6 +688,8 @@ static bool user_settings_record_v3_valid(
                user_settings_checksum_v3(record->sequence, config);
 }
 
+// Migrate schema 3 by preserving all representable fields and translating
+// its one-to-four custom cyclotron count to the protocol-4 SINGLE style.
 static void migrate_user_config_v3(const user_config_v3_t *old_config,
                                    user_config_t *new_config) {
     user_config_set_defaults(new_config);
@@ -701,6 +724,7 @@ static void migrate_user_config_v3(const user_config_v3_t *old_config,
         cyclotron_led_count_for_style(new_config->cyclotron_led_style);
 }
 
+// Migrate schema 2 Cake settings while retaining default cyclotron settings.
 static void migrate_user_config_v2(const user_config_v2_t *old_config,
                                    user_config_t *new_config) {
     user_config_set_defaults(new_config);
@@ -721,6 +745,7 @@ static void migrate_user_config_v2(const user_config_v2_t *old_config,
     new_config->cake_effect = old_config->cake_effect;
 }
 
+// Migrate schema 1 hardware/color settings and default all newer controls.
 static void migrate_user_config_v1(const user_config_v1_t *old_config,
                                    user_config_t *new_config) {
     user_config_set_defaults(new_config);
@@ -887,6 +912,8 @@ static void wait_for_ws2812_reset(uint pin) {
     }
 }
 
+// Reset the RX state machine at a detected frame boundary so the next word
+// begins on the first bit of a new WS2812 frame.
 static void restart_ws2812_rx(PIO pio, uint sm, uint offset) {
     pio_sm_set_enabled(pio, sm, false);
     pio_sm_clear_fifos(pio, sm);
@@ -896,7 +923,8 @@ static void restart_ws2812_rx(PIO pio, uint sm, uint offset) {
     pio_sm_set_enabled(pio, sm, true);
 }
 
-// Configure a PIO state machine to transmit 24-bit GRB pixels at 800 kHz.
+// Configure a PIO state machine to transmit 24-bit pixels at the requested
+// WS2811/WS2812-compatible bit rate.
 static void ws2812_tx_init(PIO pio, uint sm, uint offset, uint pin,
                            uint32_t bit_rate_hz) {
     pio_gpio_init(pio, pin);
@@ -914,6 +942,7 @@ static void ws2812_tx_init(PIO pio, uint sm, uint offset, uint pin,
     pio_sm_set_enabled(pio, sm, true);
 }
 
+// Reconfigure an existing TX state machine after a runtime bit-rate change.
 static void ws2812_tx_set_bit_rate(PIO pio, uint sm,
                                    uint32_t bit_rate_hz) {
     pio_sm_set_enabled(pio, sm, false);
@@ -926,15 +955,19 @@ static void ws2812_tx_set_bit_rate(PIO pio, uint sm,
 
 // Color conversion helpers reduce an input pixel to brightness, then apply
 // that brightness to the selected output color.
+// Return the dominant channel, which represents source intensity independent
+// of the source pixel's hue.
 static inline uint8_t max3(uint8_t a, uint8_t b, uint8_t c) {
     uint8_t maximum = a > b ? a : b;
     return maximum > c ? maximum : c;
 }
 
+// Apply an 8-bit brightness factor with rounding and without overflow.
 static inline uint8_t scale_channel(uint8_t channel, uint8_t brightness) {
     return (uint8_t)(((uint16_t)channel * brightness + 127u) / 255u);
 }
 
+// Extract brightness from one packed GRB source pixel.
 static uint8_t input_brightness(uint32_t input_grb) {
     const uint8_t green = (uint8_t)(input_grb >> 16);
     const uint8_t red = (uint8_t)(input_grb >> 8);
@@ -942,6 +975,7 @@ static uint8_t input_brightness(uint32_t input_grb) {
     return max3(red, green, blue);
 }
 
+// Sample the center emitter assigned to one of the four source phases.
 static uint8_t source_phase_brightness(const diagnostic_frame_t *frame,
                                        uint phase) {
     // The four factory lenses consume these one-based address groups:
@@ -953,11 +987,14 @@ static uint8_t source_phase_brightness(const diagnostic_frame_t *frame,
     return input_brightness(frame->pixels[center_input_index]);
 }
 
+// Map a logical cyclotron window directly to its source-phase brightness.
 static uint8_t mapped_brightness(const diagnostic_frame_t *frame,
                                  uint window_index) {
     return source_phase_brightness(frame, window_index);
 }
 
+// Find the currently dominant source phase while retaining the prior phase
+// on ties to avoid direction jitter during overlapping transitions.
 static uint8_t brightest_cyclotron_phase(
     const diagnostic_frame_t *frame, uint8_t retained_phase,
     uint8_t *brightness) {
@@ -978,6 +1015,8 @@ static uint8_t brightest_cyclotron_phase(
     return brightest_phase;
 }
 
+// Convert the Cake's synchronized or free-running clock into a logical LED,
+// fractional step progress, and completed-rotation count.
 static cake_animation_sample_t cake_chase_sample(absolute_time_t now) {
     uint64_t rotation_progress_us = 0;
     uint64_t rotation_duration_us = 0;
@@ -1051,6 +1090,7 @@ static cake_animation_sample_t cake_chase_sample(absolute_time_t now) {
     };
 }
 
+// Apply the configured Cake start offset and direction to a logical index.
 static uint16_t cake_physical_led_index(uint16_t logical_index) {
     const uint16_t count = user_config.cake_led_count;
     if (user_config.cake_reverse != 0) {
@@ -1061,6 +1101,8 @@ static uint16_t cake_physical_led_index(uint16_t logical_index) {
         (user_config.cake_start_offset + logical_index) % count);
 }
 
+// Learn source-phase timing and brightness, then update the Cake chase state
+// used by periodic rendering between incoming frames.
 static void update_cake_chase(diagnostic_frame_t *frame,
                               absolute_time_t now) {
     uint8_t brightness = 0;
@@ -1111,6 +1153,7 @@ static void update_cake_chase(diagnostic_frame_t *frame,
     frame->cake_brightness = brightness;
 }
 
+// Recolor a source brightness with one of the fixed cyclotron palette colors.
 static uint32_t recolored_grb(const output_color_t *color,
                               uint8_t brightness) {
     return ((uint32_t)scale_channel(color->green, brightness) << 16) |
@@ -1118,6 +1161,7 @@ static uint32_t recolored_grb(const output_color_t *color,
            scale_channel(color->blue, brightness);
 }
 
+// Pack raw Cake channels in the configured RGB or GRB wire order.
 static uint32_t packed_cake_pixel(uint8_t red, uint8_t green,
                                   uint8_t blue) {
     if (user_config.cake_color_order == CAKE_COLOR_ORDER_RGB) {
@@ -1130,6 +1174,7 @@ static uint32_t packed_cake_pixel(uint8_t red, uint8_t green,
            blue;
 }
 
+// Scale and pack the configured Cake color for one physical LED.
 static uint32_t recolored_cake_pixel(uint8_t red, uint8_t green,
                                      uint8_t blue, uint8_t brightness) {
     return packed_cake_pixel(
@@ -1138,6 +1183,7 @@ static uint32_t recolored_cake_pixel(uint8_t red, uint8_t green,
         scale_channel(blue, brightness));
 }
 
+// Scale and pack a cyclotron palette color in its configured wire order.
 static uint32_t packed_cyclotron_pixel(uint8_t red, uint8_t green,
                                        uint8_t blue, uint8_t brightness) {
     red = scale_channel(red, brightness);
@@ -1149,6 +1195,8 @@ static uint32_t packed_cyclotron_pixel(uint8_t red, uint8_t green,
     return ((uint32_t)green << 16) | ((uint32_t)red << 8) | blue;
 }
 
+// Map one of four logical windows to the center pixel of its physical puck
+// segment, then mirror the chain when reverse direction is enabled.
 static uint16_t cyclotron_physical_led_index(uint16_t logical_index) {
     // Each window occupies one puck segment; only its middle pixel is used.
     const uint16_t segment_count =
@@ -1162,6 +1210,8 @@ static uint16_t cyclotron_physical_led_index(uint16_t logical_index) {
     return active_index;
 }
 
+// Return the source brightness assigned to a physical cyclotron pixel; pixels
+// outside the four window centers remain dark.
 static uint8_t cyclotron_physical_brightness(
     const diagnostic_frame_t *frame, uint16_t physical_index) {
     for (uint window = 0; window < OUTPUT_LED_COUNT; ++window) {
@@ -1172,6 +1222,8 @@ static uint8_t cyclotron_physical_brightness(
     return 0;
 }
 
+// Learn source-phase timing and brightness for the configurable cyclotron
+// renderer, invalidating cached output whenever the phase advances.
 static void update_cyclotron_chase(const diagnostic_frame_t *frame,
                                    absolute_time_t now) {
     uint8_t brightness = 0;
@@ -1211,6 +1263,11 @@ static void update_cyclotron_chase(const diagnostic_frame_t *frame,
         cyclotron_chase.phase_start_known = true;
         cyclotron_chase.current_phase = phase;
         cyclotron_chase.phase_started_at = now;
+        // The physical active index normally changes with the phase, but
+        // explicitly invalidate the rendered frame as well. This keeps the
+        // reverse-direction and wraparound transitions from depending on the
+        // renderer's cached-index comparison.
+        cyclotron_chase.output_valid = false;
     }
 
     cyclotron_chase.source_brightness =
@@ -1219,6 +1276,8 @@ static void update_cyclotron_chase(const diagnostic_frame_t *frame,
             : source_phase_brightness(frame, phase);
 }
 
+// Convert the cyclotron's synchronized or free-running clock into a logical
+// window, fractional step progress, and completed-rotation count.
 static cyclotron_animation_sample_t cyclotron_chase_sample(
     absolute_time_t now) {
     uint64_t rotation_progress_us = 0;
@@ -1284,6 +1343,8 @@ static cyclotron_animation_sample_t cyclotron_chase_sample(
     };
 }
 
+// Record the earliest legal start time for the next cyclotron frame, including
+// its serialized pixels and required WS2812 reset-low interval.
 static void mark_cyclotron_tx_busy(absolute_time_t started_at) {
     const uint32_t frame_us =
         user_config.cyclotron_led_count *
@@ -1292,6 +1353,8 @@ static void mark_cyclotron_tx_busy(absolute_time_t started_at) {
     cyclotron_chase.tx_ready_at = delayed_by_us(started_at, frame_us);
 }
 
+// Wait for both the calculated reset deadline and an empty PIO FIFO so a new
+// frame cannot merge with words still queued from the previous frame.
 static absolute_time_t wait_for_cyclotron_frame_boundary(PIO pio, uint sm) {
     while (!time_reached(cyclotron_chase.tx_ready_at) ||
            !pio_sm_is_tx_fifo_empty(pio, sm)) {
@@ -1300,6 +1363,8 @@ static absolute_time_t wait_for_cyclotron_frame_boundary(PIO pio, uint sm) {
     return get_absolute_time();
 }
 
+// Render one cyclotron animation frame when its sampled position, brightness,
+// fade level, or color-shift rotation differs from the latched frame.
 static void refresh_cyclotron_output(PIO pio, uint sm,
                                      absolute_time_t now) {
     if (!cyclotron_chase.initialized ||
@@ -1443,6 +1508,8 @@ static void output_cyclotron_test(PIO pio, uint sm,
         delayed_by_ms(now, request->test_duration_ms);
 }
 
+// Latch a zero frame once and reset the cyclotron render cache. Repeated calls
+// are suppressed because WS2812 pixels retain the already-latched off state.
 static void output_cyclotron_off(PIO pio, uint sm) {
     if (cyclotron_output_is_off) {
         return;
@@ -1456,6 +1523,7 @@ static void output_cyclotron_off(PIO pio, uint sm) {
     cyclotron_output_is_off = true;
 }
 
+// Record the earliest legal start time for the next Cake frame.
 static void mark_cake_tx_busy(absolute_time_t started_at) {
     const uint32_t frame_us =
         user_config.cake_led_count *
@@ -1464,6 +1532,8 @@ static void mark_cake_tx_busy(absolute_time_t started_at) {
     cake_chase.tx_ready_at = delayed_by_us(started_at, frame_us);
 }
 
+// Render one Cake animation frame when its position, brightness, effect level,
+// or color-shift rotation differs from the latched frame.
 static void refresh_cake_output(PIO pio, uint sm, absolute_time_t now) {
     if (!cake_chase.initialized || !time_reached(cake_chase.tx_ready_at)) {
         return;
@@ -1577,6 +1647,8 @@ static void make_preview_frame(uint8_t phase) {
     preview_frame.pixels[2u + phase * INPUTS_PER_OUTPUT] = 0x00ffffffu;
 }
 
+// Reset both chase state machines and seed the synthetic synchronized timing
+// used by input-independent preview mode.
 static void initialize_preview_output_state(absolute_time_t now) {
     // Applying a preview configuration has already latched both chains off.
     // Preserve those transmit deadlines while restarting the animation state.
@@ -1615,6 +1687,8 @@ static void initialize_preview_output_state(absolute_time_t now) {
     cake_chase.output_valid = false;
 }
 
+// Advance the synthetic 250 ms source phase as needed, then refresh whichever
+// output chains have reached their periodic service deadline.
 static void run_preview_output(PIO pio, uint cyclotron_sm, uint cake_sm,
                                absolute_time_t now, bool refresh_cake,
                                bool refresh_cyclotron) {
@@ -1637,6 +1711,7 @@ static void run_preview_output(PIO pio, uint cyclotron_sm, uint cake_sm,
     }
 }
 
+// Wait for the prior Cake frame's reset interval, then latch an all-zero frame.
 static void output_cake_off(PIO pio, uint sm) {
     while (!time_reached(cake_chase.tx_ready_at)) {
         tight_loop_contents();
@@ -1649,6 +1724,7 @@ static void output_cake_off(PIO pio, uint sm) {
     cake_chase.output_valid = false;
 }
 
+// Latch a temporary single-pixel Cake test frame and its expiration deadline.
 static void output_cake_test(PIO pio, uint sm,
                              const config_request_t *request,
                              absolute_time_t now) {
@@ -1673,6 +1749,7 @@ static void output_cake_test(PIO pio, uint sm,
         delayed_by_ms(now, request->test_duration_ms);
 }
 
+// Cancel both test timers, latch both chains off, and discard animation caches.
 static void clear_test_outputs(PIO pio, uint cyclotron_sm, uint cake_sm) {
     cyclotron_test_active = false;
     cake_test_active = false;
@@ -1684,6 +1761,7 @@ static void clear_test_outputs(PIO pio, uint cyclotron_sm, uint cake_sm) {
     cake_chase.output_valid = false;
 }
 
+// Format a core-0 response into the queue drained by the USB task on core 1.
 static void queue_config_response(const char *format, ...) {
     config_response_t response;
     va_list arguments;
@@ -1693,6 +1771,8 @@ static void queue_config_response(const char *format, ...) {
     queue_try_add(&config_response_queue, &response);
 }
 
+// Serialize every active setting so the configurator can reconstruct the
+// device state after connect, save, preview, or reconnect.
 static void queue_current_config(void) {
     queue_config_response(
         "PB84 CONFIG protocol=%u firmware=%s "
@@ -1735,6 +1815,8 @@ static void queue_current_config(void) {
         preview_active ? "true" : "false");
 }
 
+// Safely clear both chains under their old lengths, apply new runtime settings,
+// update PIO bit rates, and reset animation/test state without writing flash.
 static void apply_runtime_config(PIO pio, uint cyclotron_sm, uint cake_sm,
                                  const user_config_t *config) {
     output_cyclotron_off(pio, cyclotron_sm);
@@ -1762,6 +1844,8 @@ static void apply_runtime_config(PIO pio, uint cyclotron_sm, uint cake_sm,
     cyclotron_chase.tx_ready_at = cyclotron_tx_ready_at;
 }
 
+// Execute a parsed USB request on core 0, where LED PIO and flash state are
+// owned, then queue a completion or error response for core 1.
 static void process_config_request(PIO pio, uint cyclotron_sm, uint cake_sm,
                                    const config_request_t *request) {
     if (request->kind == CONFIG_REQUEST_GET) {
@@ -1840,6 +1924,7 @@ static void process_config_request(PIO pio, uint cyclotron_sm, uint cake_sm,
     queue_config_response("PB84 OK saved=true");
 }
 
+// Drive the four physical cyclotron window pixels red for button feedback.
 static void output_all_red(PIO pio, uint sm, bool on) {
     for (uint index = 0; index < user_config.cyclotron_led_count; ++index) {
         bool is_window_pixel = false;
@@ -1925,6 +2010,7 @@ static void print_frame(const diagnostic_frame_t *frame) {
     fflush(stdout);
 }
 
+// Suppress duplicate diagnostics when all rendered and source fields match.
 static bool frames_match(const diagnostic_frame_t *a,
                          const diagnostic_frame_t *b) {
     return a->pixel_count == b->pixel_count &&
@@ -1938,17 +2024,21 @@ static bool frames_match(const diagnostic_frame_t *a,
 }
 #endif
 
+// Emit one complete CRLF-terminated protocol response over USB CDC.
 static void send_config_line(const char *line) {
     printf("%s\r\n", line);
     fflush(stdout);
 }
 
+// Hand a parsed request to core 0 without blocking USB service when busy.
 static void submit_config_request(const config_request_t *request) {
     if (!queue_try_add(&config_request_queue, request)) {
         send_config_line("PB84 ERROR device is busy");
     }
 }
 
+// Parse one complete PB84 command line, validate its fields, and queue any
+// operation that touches shared configuration, flash, or LED hardware.
 static void handle_config_command(char *line) {
     while (*line == ' ' || *line == '\t') {
         ++line;
@@ -2081,6 +2171,8 @@ static void handle_config_command(char *line) {
     send_config_line("PB84 ERROR unsupported command");
 }
 
+// Assemble non-blocking USB input into command lines and drain responses from
+// core 0; this keeps serial traffic out of the timing-sensitive capture loop.
 static void config_usb_task(void) {
     static char command[CONFIG_COMMAND_MAX];
     static size_t command_length;
@@ -2138,6 +2230,8 @@ static void diagnostics_core(void) {
     }
 }
 
+// Initialize hardware and run the core-0 event loop that captures WS2812 input,
+// services LED output deadlines, handles controls, and persists settings.
 int main(void) {
     // Restore saved preferences and bring up GPIO, multicore, and PIO hardware.
     set_sys_clock_khz(SYSTEM_CLOCK_KHZ, true);

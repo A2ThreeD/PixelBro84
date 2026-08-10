@@ -14,6 +14,8 @@ All notable project changes are documented here.
   free-running preview uses the configured cyclotron and Cake settings.
 - Hardened cyclotron animation refreshes by waiting for the WS2812 PIO TX
   FIFO and reset boundary before queuing each frame.
+- Explicitly invalidated the cyclotron render cache on every phase change so
+  reverse-direction and 4-to-1 wrap transitions always queue a fresh frame.
 
 ## [1.2.1] - 2026-08-03
 

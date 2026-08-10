@@ -7,12 +7,14 @@
 
 #define CONFIG_PARSE_BUFFER_SIZE 1024u
 
+// Copy a parser or validation failure into the caller's optional buffer.
 static void set_error(char *error, size_t error_size, const char *message) {
     if (error != NULL && error_size > 0) {
         snprintf(error, error_size, "%s", message);
     }
 }
 
+// Parse an unsigned decimal field without accepting overflow or trailing text.
 static bool parse_u16(const char *value, uint16_t *result) {
     char *end = NULL;
     errno = 0;
@@ -24,6 +26,7 @@ static bool parse_u16(const char *value, uint16_t *result) {
     return true;
 }
 
+// Parse a byte-sized decimal field using the stricter 16-bit parser above.
 static bool parse_u8(const char *value, uint8_t *result) {
     uint16_t parsed = 0;
     if (!parse_u16(value, &parsed) || parsed > UINT8_MAX) {
@@ -33,6 +36,7 @@ static bool parse_u8(const char *value, uint8_t *result) {
     return true;
 }
 
+// Accept the textual and numeric boolean forms used by protocol clients.
 static bool parse_bool(const char *value, uint8_t *result) {
     if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) {
         *result = 1;
@@ -45,6 +49,7 @@ static bool parse_bool(const char *value, uint8_t *result) {
     return false;
 }
 
+// Populate the complete factory baseline used for first boot and migrations.
 void user_config_set_defaults(user_config_t *config) {
     *config = (user_config_t){
         .version = USER_CONFIG_VERSION,
@@ -78,18 +83,22 @@ void user_config_set_defaults(user_config_t *config) {
     };
 }
 
+// Convert the stored LED-type enumeration to its protocol spelling.
 const char *cake_led_type_name(uint8_t type) {
     return type == CAKE_LED_TYPE_WS2811 ? "WS2811" : "WS2812B";
 }
 
+// Convert the stored wire-order enumeration to its protocol spelling.
 const char *cake_color_order_name(uint8_t order) {
     return order == CAKE_COLOR_ORDER_RGB ? "RGB" : "GRB";
 }
 
+// Convert the timing-mode enumeration to the value returned over USB.
 const char *cake_timing_mode_name(uint8_t mode) {
     return mode == CAKE_TIMING_FREE ? "FREE" : "SYNCED";
 }
 
+// Convert the effect enumeration to the value returned over USB.
 const char *cake_effect_name(uint8_t effect) {
     static const char *const names[] = {
         "SOLID", "FADE", "TRAIL", "COLOR_SHIFT",
@@ -97,11 +106,13 @@ const char *cake_effect_name(uint8_t effect) {
     return effect <= CAKE_EFFECT_COLOR_SHIFT ? names[effect] : "UNKNOWN";
 }
 
+// Return the total physical pixel count required by a cyclotron style.
 uint16_t cyclotron_led_count_for_style(uint8_t style) {
     static const uint16_t counts[] = {4, 12, 20, 36};
     return style < (sizeof(counts) / sizeof(counts[0])) ? counts[style] : 0;
 }
 
+// Convert the cyclotron layout enumeration to its protocol spelling.
 const char *cyclotron_led_style_name(uint8_t style) {
     static const char *const names[] = {
         "SINGLE", "PUCK3", "PUCK5", "PUCK9",
@@ -110,6 +121,7 @@ const char *cyclotron_led_style_name(uint8_t style) {
                                                       : "UNKNOWN";
 }
 
+// Infer a protocol-4 style from a legacy explicit physical pixel count.
 static uint8_t cyclotron_led_style_from_count(uint16_t count) {
     if (count > 0 && count <= CYCLOTRON_WINDOW_COUNT) {
         return CYCLOTRON_STYLE_SINGLE;
@@ -126,6 +138,7 @@ static uint8_t cyclotron_led_style_from_count(uint16_t count) {
     }
 }
 
+// Reject configurations that cannot be safely rendered or persisted.
 bool user_config_validate(const user_config_t *config,
                           uint8_t outer_color_count,
                           char *error,
@@ -234,6 +247,8 @@ bool user_config_validate(const user_config_t *config,
     return true;
 }
 
+// Apply whitespace-separated key=value updates to a base configuration, then
+// normalize legacy request versions and validate the complete result.
 bool user_config_parse_update(const char *settings,
                               const user_config_t *base,
                               uint8_t outer_color_count,

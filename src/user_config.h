@@ -72,16 +72,21 @@ typedef struct {
     uint8_t cyclotron_reserved[3];
 } user_config_t;
 
+// Cyclotron layout helpers keep the style name and physical chain length in
+// sync for the renderer, saved settings, and USB protocol.
 uint16_t cyclotron_led_count_for_style(uint8_t style);
 const char *cyclotron_led_style_name(uint8_t style);
 
+// Initialize a complete, valid configuration for first boot or migration.
 void user_config_set_defaults(user_config_t *config);
 
+// Validate all cross-field constraints before rendering or writing flash.
 bool user_config_validate(const user_config_t *config,
                           uint8_t outer_color_count,
                           char *error,
                           size_t error_size);
 
+// Parse a partial protocol update over a supplied base configuration.
 bool user_config_parse_update(const char *settings,
                               const user_config_t *base,
                               uint8_t outer_color_count,
@@ -89,6 +94,7 @@ bool user_config_parse_update(const char *settings,
                               char *error,
                               size_t error_size);
 
+// Protocol serialization helpers for the shared Cake/cyclotron enumerations.
 const char *cake_led_type_name(uint8_t type);
 const char *cake_color_order_name(uint8_t order);
 const char *cake_timing_mode_name(uint8_t mode);
