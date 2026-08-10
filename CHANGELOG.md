@@ -2,6 +2,21 @@
 
 All notable project changes are documented here.
 
+## [1.2.4] - 2026-08-09
+
+- Added the `PB84 TEST CLEAR` command to clear both LED output chains and
+  cancel active LED tests.
+
+## [1.2.3] - 2026-08-09
+
+- Hardened rapid cyclotron LED test handoff by starting the transmit pacing
+  window after each complete frame has been queued.
+
+## [1.2.2] - 2026-08-09
+
+- Fixed rapid cyclotron LED tests merging WS2812 frames by enforcing the
+  transmit FIFO and reset-low boundary before test and clear frames.
+
 ## [1.2.1] - 2026-08-03
 
 - Fixed Solid cyclotron animations changing palette color after each completed

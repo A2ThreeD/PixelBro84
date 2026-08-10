@@ -2,8 +2,8 @@
  * Project:    PixelBro84
  * Programmer: Aaron Morris
  * Company:    A2ThreeD
- * Version:    1.2.1
- * Date:       2026-08-03
+ * Version:    1.2.4
+ * Date:       2026-08-09
  *
  * Copyright (c) 2026 Aaron Morris / A2ThreeD.
  *
@@ -32,13 +32,13 @@
 // Keep the numeric components and display string synchronized for releases.
 #define PROJECT_VERSION_MAJOR 1
 #define PROJECT_VERSION_MINOR 2
-#define PROJECT_VERSION_PATCH 1
-#define PROJECT_VERSION_STRING "1.2.1"
-#define PROJECT_RELEASE_DATE "2026-08-03"
+#define PROJECT_VERSION_PATCH 4
+#define PROJECT_VERSION_STRING "1.2.4"
+#define PROJECT_RELEASE_DATE "2026-08-09"
 
 // License and release summary reported by the Pico binary metadata.
 #define PROJECT_LICENSE "PolyForm-Noncommercial-1.0.0"
 #define PROJECT_CHANGE_SUMMARY \
-    "Fixed solid cyclotron color during free-running rotations"
+    "Added a clear-all LED test command"
 
 #endif

@@ -34,6 +34,7 @@ PB84 PREVIEW START <fields>
 PB84 PREVIEW STOP
 PB84 TEST led=<index> red=<0-255> green=<0-255> blue=<0-255> duration_ms=<ms>
 PB84 TEST target=cyclotron led=<1-4> color_index=<index> duration_ms=<ms>
+PB84 TEST CLEAR
 ```
 
 - `GET` returns the complete active configuration.
@@ -42,6 +43,7 @@ PB84 TEST target=cyclotron led=<1-4> color_index=<index> duration_ms=<ms>
 - `PREVIEW START` applies settings without writing flash.
 - `PREVIEW STOP` restores the saved settings.
 - `TEST` temporarily illuminates a selected Cake or cyclotron LED.
+- `TEST CLEAR` clears both LED output chains and cancels active LED tests.
 
 `SET` and `PREVIEW START` accept partial updates based on the active
 configuration. The configurator normally sends every field supported by the

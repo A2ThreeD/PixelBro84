@@ -314,6 +314,7 @@ typedef enum {
     CONFIG_REQUEST_GET,
     CONFIG_REQUEST_SET,
     CONFIG_REQUEST_TEST,
+    CONFIG_REQUEST_CLEAR_TEST,
     CONFIG_REQUEST_PREVIEW_START,
     CONFIG_REQUEST_PREVIEW_STOP,
 } config_request_kind_t;
@@ -1287,6 +1288,14 @@ static void mark_cyclotron_tx_busy(absolute_time_t started_at) {
     cyclotron_chase.tx_ready_at = delayed_by_us(started_at, frame_us);
 }
 
+static absolute_time_t wait_for_cyclotron_frame_boundary(PIO pio, uint sm) {
+    while (!time_reached(cyclotron_chase.tx_ready_at) ||
+           !pio_sm_is_tx_fifo_empty(pio, sm)) {
+        tight_loop_contents();
+    }
+    return get_absolute_time();
+}
+
 static void refresh_cyclotron_output(PIO pio, uint sm,
                                      absolute_time_t now) {
     if (!cyclotron_chase.initialized ||
@@ -1344,12 +1353,15 @@ static void refresh_cyclotron_output(PIO pio, uint sm,
                                    scale_channel(cyclotron_chase.source_brightness,
                                                  effect_brightness)) << 8);
     }
-    mark_cyclotron_tx_busy(now);
     cyclotron_chase.output_led_index = active_index;
     cyclotron_chase.output_brightness = cyclotron_chase.source_brightness;
     cyclotron_chase.output_effect_level = effect_level;
     cyclotron_chase.output_rotation = rendered_rotation;
     cyclotron_chase.output_valid = true;
+    // Start the pacing window after all words have been accepted. A blocking
+    // FIFO write can outlive the timestamp captured before the frame began.
+    now = get_absolute_time();
+    mark_cyclotron_tx_busy(now);
     cyclotron_output_is_off = false;
 }
 
@@ -1369,7 +1381,6 @@ static void output_cyclotron_frame(PIO pio, uint sm,
     if (user_config.cyclotron_timing_mode == CAKE_TIMING_SYNCED &&
         user_config.cyclotron_speed_multiplier == 1 &&
         user_config.cyclotron_effect == CAKE_EFFECT_SOLID) {
-        const absolute_time_t now = get_absolute_time();
         if (!time_reached(cyclotron_chase.tx_ready_at)) return;
         const output_color_t *color =
             &output_colors[user_config.outer_color_index];
@@ -1382,7 +1393,7 @@ static void output_cyclotron_frame(PIO pio, uint sm,
                 packed_cyclotron_pixel(color->red, color->green, color->blue,
                                        brightness) << 8);
         }
-        mark_cyclotron_tx_busy(now);
+        mark_cyclotron_tx_busy(get_absolute_time());
         cyclotron_chase.output_valid = false;
         cyclotron_output_is_off = false;
         return;
@@ -1395,6 +1406,11 @@ static void output_cyclotron_frame(PIO pio, uint sm,
 static void output_cyclotron_test(PIO pio, uint sm,
                                   const config_request_t *request,
                                   absolute_time_t now) {
+    // A WS2812 frame must be followed by its reset-low interval before the
+    // next frame starts. Test clicks can arrive back-to-back, so use the
+    // same transmit pacing as the normal cyclotron output path.
+    now = wait_for_cyclotron_frame_boundary(pio, sm);
+
     const output_color_t *color =
         &output_colors[request->test_color_index];
     const uint16_t active_index =
@@ -1407,6 +1423,9 @@ static void output_cyclotron_test(PIO pio, uint sm,
                                    : 0u;
         pio_sm_put_blocking(pio, sm, pixel << 8);
     }
+    now = get_absolute_time();
+    mark_cyclotron_tx_busy(now);
+    cyclotron_chase.output_valid = false;
     cyclotron_test_active = true;
     cyclotron_output_is_off = false;
     cyclotron_test_until =
@@ -1417,6 +1436,7 @@ static void output_cyclotron_off(PIO pio, uint sm) {
     if (cyclotron_output_is_off) {
         return;
     }
+    wait_for_cyclotron_frame_boundary(pio, sm);
     for (uint index = 0; index < user_config.cyclotron_led_count; ++index) {
         pio_sm_put_blocking(pio, sm, 0u);
     }
@@ -1574,6 +1594,17 @@ static void output_cake_test(PIO pio, uint sm,
         delayed_by_ms(now, request->test_duration_ms);
 }
 
+static void clear_test_outputs(PIO pio, uint cyclotron_sm, uint cake_sm) {
+    cyclotron_test_active = false;
+    cake_test_active = false;
+    output_cyclotron_off(pio, cyclotron_sm);
+    output_cake_off(pio, cake_sm);
+    cyclotron_chase.initialized = false;
+    cyclotron_chase.output_valid = false;
+    cake_chase.initialized = false;
+    cake_chase.output_valid = false;
+}
+
 static void queue_config_response(const char *format, ...) {
     config_response_t response;
     va_list arguments;
@@ -1680,6 +1711,12 @@ static void process_config_request(PIO pio, uint cyclotron_sm, uint cake_sm,
         output_cake_test(pio, cake_sm, request, get_absolute_time());
         queue_config_response("PB84 OK tested_target=cake tested_led=%u",
                               request->test_led_index + 1);
+        return;
+    }
+
+    if (request->kind == CONFIG_REQUEST_CLEAR_TEST) {
+        clear_test_outputs(pio, cyclotron_sm, cake_sm);
+        queue_config_response("PB84 OK test_cleared=true");
         return;
     }
 
@@ -1892,6 +1929,14 @@ static void handle_config_command(char *line) {
     }
 
     if (strncmp(line, "PB84 TEST ", 10) == 0) {
+        if (strcmp(line + 10, "CLEAR") == 0) {
+            const config_request_t request = {
+                .kind = CONFIG_REQUEST_CLEAR_TEST,
+            };
+            submit_config_request(&request);
+            return;
+        }
+
         if (strncmp(line + 10, "target=cyclotron ", 17) == 0) {
             unsigned int led = 0;
             unsigned int color_index = 0;
