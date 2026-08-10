@@ -1307,6 +1307,13 @@ static void refresh_cyclotron_output(PIO pio, uint sm,
         return;
     }
 
+    // The timestamp is a conservative guard, but the PIO FIFO is the final
+    // authority. Preview refreshes can be generated without a source-frame
+    // boundary, so require the previous frame to be fully drained before
+    // queuing another one. This prevents an occasional merged frame from
+    // leaving the cyclotron WS2812 chain latched on its trail pair.
+    now = wait_for_cyclotron_frame_boundary(pio, sm);
+
     const cyclotron_animation_sample_t sample =
         cyclotron_chase_sample(now);
     const uint16_t active_index =

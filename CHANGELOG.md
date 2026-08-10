@@ -2,26 +2,18 @@
 
 All notable project changes are documented here.
 
-## [1.2.5] - 2026-08-10
+## [1.2.2] - 2026-08-10
 
-- Made animation preview run both output chains without incoming WS2812 data.
-- Added a documented 250 ms synthetic synchronized-preview phase clock; free
-  preview uses the configured cyclotron and Cake rotation settings.
-
-## [1.2.4] - 2026-08-09
-
-- Added the `PB84 TEST CLEAR` command to clear both LED output chains and
-  cancel active LED tests.
-
-## [1.2.3] - 2026-08-09
-
-- Hardened rapid cyclotron LED test handoff by starting the transmit pacing
-  window after each complete frame has been queued.
-
-## [1.2.2] - 2026-08-09
-
+- Consolidated the 1.2.2–1.2.6 development fixes into this release.
 - Fixed rapid cyclotron LED tests merging WS2812 frames by enforcing the
   transmit FIFO and reset-low boundary before test and clear frames.
+- Added `PB84 TEST CLEAR` to clear both LED output chains and cancel active
+  LED tests.
+- Made animation preview run both output chains without incoming WS2812 data.
+- Added a documented 250 ms synthetic synchronized-preview phase clock;
+  free-running preview uses the configured cyclotron and Cake settings.
+- Hardened cyclotron animation refreshes by waiting for the WS2812 PIO TX
+  FIFO and reset boundary before queuing each frame.
 
 ## [1.2.1] - 2026-08-03
 

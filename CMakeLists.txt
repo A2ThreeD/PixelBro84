@@ -23,7 +23,7 @@ add_executable(PixelBro84
 )
 
 pico_set_program_name(PixelBro84 "PixelBro84")
-pico_set_program_version(PixelBro84 "1.2.5")
+pico_set_program_version(PixelBro84 "1.2.2")
 
 # Compile both PIO assembly programs into headers consumed by main.c.
 pico_generate_pio_header(PixelBro84

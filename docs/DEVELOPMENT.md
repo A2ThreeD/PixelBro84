@@ -44,7 +44,9 @@ be developed together.
 
 Use patch releases for release corrections (`1.2.1`) rather than moving an
 existing release tag. Git tags and published UF2 artifacts should be treated
-as immutable.
+as immutable. The consolidated PixelBro84 1.2.2 release combines the
+previously unpublished 1.2.2–1.2.6 development fixes into one release; future
+release notes should continue from this published version.
 
 ## Compatibility rules
 
