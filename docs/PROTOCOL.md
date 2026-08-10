@@ -40,8 +40,14 @@ PB84 TEST CLEAR
 - `GET` returns the complete active configuration.
 - `SET` validates and persists a configuration update, then replies with
   `PB84 OK` or `PB84 ERROR <message>`.
-- `PREVIEW START` applies settings without writing flash.
-- `PREVIEW STOP` restores the saved settings.
+- `PREVIEW START` applies settings without writing flash and starts both the
+  cyclotron and Cake animations even when no WS2812 input is arriving.
+- In synchronized preview mode, the firmware uses a synthetic 250 ms phase
+  pulse as the assumed input clock. This is a preview-only assumption; live
+  synchronized operation continues to learn timing from the incoming frame.
+- In free-running preview mode, each output uses its configured rotation
+  duration and effect settings. The preview continues until `PREVIEW STOP`.
+- `PREVIEW STOP` restores the saved settings and clears the preview output.
 - `TEST` temporarily illuminates a selected Cake or cyclotron LED.
 - `TEST CLEAR` clears both LED output chains and cancels active LED tests.
 

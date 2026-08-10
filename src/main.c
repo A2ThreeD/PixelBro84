@@ -79,6 +79,7 @@ bi_decl(bi_program_description(PROJECT_CHANGE_SUMMARY));
 #define LID_DEBOUNCE_MS 20u
 #define CAKE_REFRESH_MS 5u
 #define INPUT_IDLE_OFF_MS 250u
+#define PREVIEW_SYNC_PHASE_MS 250u
 #define COLOR_SAVE_DELAY_MS 1000u
 #define CONFIG_FLASH_ON_MS 150u
 #define CONFIG_FLASH_OFF_MS 120u
@@ -363,6 +364,9 @@ static bool previous_serial_frame_valid;
 static user_config_t user_config;
 static user_config_t preview_saved_config;
 static bool preview_active;
+static absolute_time_t preview_next_phase_at;
+static uint8_t preview_phase;
+static diagnostic_frame_t preview_frame;
 static uint32_t settings_sequence;
 static uint settings_next_slot;
 static settings_flash_write_t settings_flash_write;
@@ -1558,6 +1562,74 @@ static void output_cake_frame(PIO pio, uint sm,
     refresh_cake_output(pio, sm, now);
 }
 
+// Preview has no live WS2812 source frame to map. Synthesize the same center
+// emitter that the real four-phase input uses, one phase at a time.
+static void make_preview_frame(uint8_t phase) {
+    memset(&preview_frame, 0, sizeof(preview_frame));
+    preview_frame.pixel_count = HASBRO_INPUT_PIXELS;
+    preview_frame.pixels[2u + phase * INPUTS_PER_OUTPUT] = 0x00ffffffu;
+}
+
+static void initialize_preview_output_state(absolute_time_t now) {
+    // Applying a preview configuration has already latched both chains off.
+    // Preserve those transmit deadlines while restarting the animation state.
+    const absolute_time_t cyclotron_tx_ready_at = cyclotron_chase.tx_ready_at;
+    const absolute_time_t cake_tx_ready_at = cake_chase.tx_ready_at;
+    const uint32_t preview_phase_us = PREVIEW_SYNC_PHASE_MS * 1000u;
+
+    memset(&cyclotron_chase, 0, sizeof(cyclotron_chase));
+    memset(&cake_chase, 0, sizeof(cake_chase));
+    cyclotron_chase.tx_ready_at = cyclotron_tx_ready_at;
+    cake_chase.tx_ready_at = cake_tx_ready_at;
+
+    preview_phase = 0;
+    preview_next_phase_at = delayed_by_ms(now, PREVIEW_SYNC_PHASE_MS);
+    make_preview_frame(preview_phase);
+    update_cyclotron_chase(&preview_frame, now);
+    update_cake_chase(&preview_frame, now);
+
+    // A synchronized preview uses the documented synthetic 250 ms pulse.
+    // Seed every phase so the animation is responsive from its first frame,
+    // instead of waiting for the live-input learning interval.
+    cyclotron_chase.fallback_duration_us = preview_phase_us;
+    cyclotron_chase.valid_duration_mask = (1u << OUTPUT_LED_COUNT) - 1u;
+    for (uint phase = 0; phase < OUTPUT_LED_COUNT; ++phase) {
+        cyclotron_chase.phase_duration_us[phase] = preview_phase_us;
+    }
+    cyclotron_chase.phase_start_known = true;
+    cyclotron_chase.output_valid = false;
+
+    cake_chase.fallback_duration_us = preview_phase_us;
+    cake_chase.valid_duration_mask = (1u << OUTPUT_LED_COUNT) - 1u;
+    for (uint phase = 0; phase < OUTPUT_LED_COUNT; ++phase) {
+        cake_chase.phase_duration_us[phase] = preview_phase_us;
+    }
+    cake_chase.phase_start_known = true;
+    cake_chase.output_valid = false;
+}
+
+static void run_preview_output(PIO pio, uint cyclotron_sm, uint cake_sm,
+                               absolute_time_t now, bool refresh_cake,
+                               bool refresh_cyclotron) {
+    while (time_reached(preview_next_phase_at)) {
+        preview_phase = (uint8_t)((preview_phase + 1u) % OUTPUT_LED_COUNT);
+        make_preview_frame(preview_phase);
+        // Use the scheduled boundary as the phase timestamp. This preserves
+        // the synthetic 250 ms clock if the main loop is briefly busy.
+        update_cyclotron_chase(&preview_frame, preview_next_phase_at);
+        update_cake_chase(&preview_frame, preview_next_phase_at);
+        preview_next_phase_at =
+            delayed_by_ms(preview_next_phase_at, PREVIEW_SYNC_PHASE_MS);
+    }
+
+    if (refresh_cake) {
+        refresh_cake_output(pio, cake_sm, now);
+    }
+    if (refresh_cyclotron) {
+        refresh_cyclotron_output(pio, cyclotron_sm, now);
+    }
+}
+
 static void output_cake_off(PIO pio, uint sm) {
     while (!time_reached(cake_chase.tx_ready_at)) {
         tight_loop_contents();
@@ -1666,8 +1738,11 @@ static void apply_runtime_config(PIO pio, uint cyclotron_sm, uint cake_sm,
     while (!time_reached(cake_chase.tx_ready_at)) {
         tight_loop_contents();
     }
+    const absolute_time_t cyclotron_tx_ready_at = cyclotron_chase.tx_ready_at;
+    const absolute_time_t cake_tx_ready_at = cake_chase.tx_ready_at;
     user_config = *config;
     memset(&cake_chase, 0, sizeof(cake_chase));
+    cake_chase.tx_ready_at = cake_tx_ready_at;
     ws2812_tx_set_bit_rate(
         pio, cyclotron_sm,
         (uint32_t)user_config.cyclotron_bit_rate_khz * 1000u);
@@ -1677,6 +1752,7 @@ static void apply_runtime_config(PIO pio, uint cyclotron_sm, uint cake_sm,
     cake_test_active = false;
     cyclotron_test_active = false;
     memset(&cyclotron_chase, 0, sizeof(cyclotron_chase));
+    cyclotron_chase.tx_ready_at = cyclotron_tx_ready_at;
 }
 
 static void process_config_request(PIO pio, uint cyclotron_sm, uint cake_sm,
@@ -1726,6 +1802,7 @@ static void process_config_request(PIO pio, uint cyclotron_sm, uint cake_sm,
         }
         apply_runtime_config(pio, cyclotron_sm, cake_sm, &request->config);
         preview_active = true;
+        initialize_preview_output_state(get_absolute_time());
         queue_config_response("PB84 OK preview=true");
         return;
     }
@@ -2174,12 +2251,14 @@ int main(void) {
                     next_idle_off =
                         delayed_by_ms(frame_time, INPUT_IDLE_OFF_MS);
                 }
-                if (!cyclotron_test_active) {
-                    output_cyclotron_frame(pio, tx_sm, &capture_frame);
-                }
-                if (!cake_test_active) {
-                    output_cake_frame(pio, cake_tx_sm, &capture_frame,
-                                      frame_time);
+                if (!preview_active) {
+                    if (!cyclotron_test_active) {
+                        output_cyclotron_frame(pio, tx_sm, &capture_frame);
+                    }
+                    if (!cake_test_active) {
+                        output_cake_frame(pio, cake_tx_sm, &capture_frame,
+                                          frame_time);
+                    }
                 }
             }
 #if ENABLE_USB_DIAGNOSTICS
@@ -2212,7 +2291,8 @@ int main(void) {
         // without sending an all-off frame, latch one explicit zero frame.
         // output_cyclotron_off() suppresses further zero-frame traffic until
         // an illuminated frame has actually been sent.
-        if (config_flash_phase == 0 && time_reached(next_idle_off)) {
+        if (config_flash_phase == 0 && !preview_active &&
+            time_reached(next_idle_off)) {
             const absolute_time_t now = get_absolute_time();
             next_idle_off = delayed_by_ms(now, INPUT_IDLE_OFF_MS);
             if (!cyclotron_test_active) {
@@ -2227,14 +2307,33 @@ int main(void) {
 
         // Refresh from the measured phase clock even when the source frame is
         // unchanged. TX readiness guarantees a reset-low latch between frames.
-        if (config_flash_phase == 0 && !cake_test_active &&
+        if (config_flash_phase == 0 && preview_active &&
+            (time_reached(next_cake_refresh) ||
+             time_reached(next_cyclotron_refresh))) {
+            const absolute_time_t now = get_absolute_time();
+            const bool refresh_cake = time_reached(next_cake_refresh);
+            const bool refresh_cyclotron =
+                time_reached(next_cyclotron_refresh);
+            if (refresh_cake) {
+                next_cake_refresh = delayed_by_ms(now, CAKE_REFRESH_MS);
+            }
+            if (refresh_cyclotron) {
+                next_cyclotron_refresh = delayed_by_ms(now, CAKE_REFRESH_MS);
+            }
+            run_preview_output(pio, tx_sm, cake_tx_sm, now, refresh_cake,
+                               refresh_cyclotron);
+        }
+
+        if (config_flash_phase == 0 && !preview_active &&
+            !cake_test_active &&
             time_reached(next_cake_refresh)) {
             const absolute_time_t now = get_absolute_time();
             next_cake_refresh = delayed_by_ms(now, CAKE_REFRESH_MS);
             refresh_cake_output(pio, cake_tx_sm, now);
         }
 
-        if (config_flash_phase == 0 && !cyclotron_test_active &&
+        if (config_flash_phase == 0 && !preview_active &&
+            !cyclotron_test_active &&
             (user_config.cyclotron_timing_mode == CAKE_TIMING_FREE ||
              user_config.cyclotron_speed_multiplier != 1 ||
              user_config.cyclotron_effect != CAKE_EFFECT_SOLID) &&

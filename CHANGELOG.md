@@ -2,6 +2,12 @@
 
 All notable project changes are documented here.
 
+## [1.2.5] - 2026-08-10
+
+- Made animation preview run both output chains without incoming WS2812 data.
+- Added a documented 250 ms synthetic synchronized-preview phase clock; free
+  preview uses the configured cyclotron and Cake rotation settings.
+
 ## [1.2.4] - 2026-08-09
 
 - Added the `PB84 TEST CLEAR` command to clear both LED output chains and

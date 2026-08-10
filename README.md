@@ -2,8 +2,8 @@
 
 | Project field | Value |
 | --- | --- |
-| Version | 1.2.4 |
-| Release date | August 9, 2026 |
+| Version | 1.2.5 |
+| Release date | August 10, 2026 |
 | Programmer | Aaron Morris |
 | Company | A2ThreeD |
 
@@ -172,7 +172,10 @@ Production firmware exposes a USB CDC configuration port. Open the standalone
 PixelBro84 Configurator in a Web Serial-capable desktop browser, connect the
 controller, adjust settings, preview the selected Cake animation, test the four
 cyclotron LEDs or individual Cake LEDs, and select **Save to PixelBro84**. A
-preview runs without writing flash; stopping it restores the saved settings.
+Preview runs both output animations without requiring incoming WS2812 data.
+In synchronized preview mode, the firmware assumes a 250 ms input phase
+pulse; in free-running mode, it uses the configured rotation settings.
+Preview does not write flash, and stopping it restores the saved settings.
 The device validates the complete configuration before appending it to the
 flash journal.
 
