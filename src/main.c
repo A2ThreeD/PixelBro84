@@ -256,6 +256,8 @@ typedef struct {
     bool truncated;
 } diagnostic_frame_t;
 
+// Shared chase state for both output chains. Hardware-specific renderers own
+// separate instances but use the same phase clock and output-cache fields.
 typedef struct {
     absolute_time_t phase_started_at;
     absolute_time_t free_started_at;
@@ -273,38 +275,13 @@ typedef struct {
     bool initialized;
     bool phase_start_known;
     bool output_valid;
-} cake_chase_state_t;
+} chase_state_t;
 
 typedef struct {
     uint32_t rotation;
     uint16_t logical_index;
     uint8_t step_progress;
-} cake_animation_sample_t;
-
-typedef struct {
-    absolute_time_t phase_started_at;
-    absolute_time_t free_started_at;
-    absolute_time_t tx_ready_at;
-    uint32_t phase_duration_us[OUTPUT_LED_COUNT];
-    uint32_t fallback_duration_us;
-    uint32_t sync_cycle_count;
-    uint16_t output_led_index;
-    uint8_t current_phase;
-    uint8_t valid_duration_mask;
-    uint8_t source_brightness;
-    uint8_t output_brightness;
-    uint8_t output_effect_level;
-    uint32_t output_rotation;
-    bool initialized;
-    bool phase_start_known;
-    bool output_valid;
-} cyclotron_chase_state_t;
-
-typedef struct {
-    uint32_t rotation;
-    uint16_t logical_index;
-    uint8_t step_progress;
-} cyclotron_animation_sample_t;
+} chase_animation_sample_t;
 
 #define CONFIG_PROTOCOL_VERSION 4u
 #define CONFIG_COMMAND_MAX 1024u
@@ -341,10 +318,34 @@ typedef struct {
     char text[CONFIG_MESSAGE_MAX];
 } config_response_t;
 
+// Mutable deadlines and debounce state owned by the core-0 event loop.
+typedef struct {
+    uint32_t frame_number;
+    absolute_time_t last_pixel_time;
+    absolute_time_t next_idle_off;
+    absolute_time_t next_button_poll;
+    absolute_time_t button_changed_at;
+    absolute_time_t button_pressed_at;
+    absolute_time_t next_lid_poll;
+    absolute_time_t lid_changed_at;
+    absolute_time_t next_cyclotron_refresh;
+    absolute_time_t next_cake_refresh;
+    absolute_time_t color_save_at;
+    absolute_time_t config_flash_at;
+    bool receiving_frame;
+    bool button_raw_pressed;
+    bool button_pressed;
+    bool button_long_press_handled;
+    bool lid_raw_closed;
+    bool lid_closed;
+    bool color_save_pending;
+    uint8_t config_flash_phase;
+} runtime_state_t;
+
 // State shared by frame capture, settings persistence, and the second core.
 static diagnostic_frame_t capture_frame;
-static cake_chase_state_t cake_chase;
-static cyclotron_chase_state_t cyclotron_chase;
+static chase_state_t cake_chase;
+static chase_state_t cyclotron_chase;
 static queue_t config_request_queue;
 static queue_t config_response_queue;
 static absolute_time_t cake_test_until;
@@ -1015,34 +1016,35 @@ static uint8_t brightest_cyclotron_phase(
     return brightest_phase;
 }
 
-// Convert the Cake's synchronized or free-running clock into a logical LED,
+// Convert a synchronized or free-running chase clock into a logical LED,
 // fractional step progress, and completed-rotation count.
-static cake_animation_sample_t cake_chase_sample(absolute_time_t now) {
+static chase_animation_sample_t chase_animation_sample(
+    const chase_state_t *chase, absolute_time_t now, uint8_t timing_mode,
+    uint16_t rotation_ms, uint8_t speed_multiplier,
+    uint16_t logical_led_count) {
     uint64_t rotation_progress_us = 0;
     uint64_t rotation_duration_us = 0;
     uint64_t completed_rotations = 0;
 
-    if (user_config.cake_timing_mode == CAKE_TIMING_FREE) {
-        rotation_duration_us =
-            (uint64_t)user_config.cake_rotation_ms * 1000u;
+    if (timing_mode == CAKE_TIMING_FREE) {
+        rotation_duration_us = (uint64_t)rotation_ms * 1000u;
         const int64_t measured_us =
-            absolute_time_diff_us(cake_chase.free_started_at, now);
+            absolute_time_diff_us(chase->free_started_at, now);
         const uint64_t elapsed_us =
             measured_us > 0 ? (uint64_t)measured_us : 0u;
         completed_rotations = elapsed_us / rotation_duration_us;
         rotation_progress_us = elapsed_us % rotation_duration_us;
     } else {
-        const uint8_t current_phase = cake_chase.current_phase;
-        uint32_t phase_duration_us = cake_chase.fallback_duration_us;
-        if ((cake_chase.valid_duration_mask & (1u << current_phase)) != 0) {
-            phase_duration_us =
-                cake_chase.phase_duration_us[current_phase];
+        const uint8_t current_phase = chase->current_phase;
+        uint32_t phase_duration_us = chase->fallback_duration_us;
+        if ((chase->valid_duration_mask & (1u << current_phase)) != 0) {
+            phase_duration_us = chase->phase_duration_us[current_phase];
         }
 
         uint64_t elapsed_us = 0;
         if (phase_duration_us > 0) {
             const int64_t measured_us =
-                absolute_time_diff_us(cake_chase.phase_started_at, now);
+                absolute_time_diff_us(chase->phase_started_at, now);
             if (measured_us > 0) {
                 elapsed_us = (uint64_t)measured_us;
             }
@@ -1054,14 +1056,11 @@ static cake_animation_sample_t cake_chase_sample(absolute_time_t now) {
         rotation_duration_us =
             (uint64_t)OUTPUT_LED_COUNT * phase_duration_us;
         if (rotation_duration_us == 0) {
-            const uint16_t logical_index =
-                (uint16_t)(((uint32_t)current_phase *
-                            user_config.cake_led_count) /
-                           OUTPUT_LED_COUNT);
-            return (cake_animation_sample_t){
-                .rotation = cake_chase.sync_cycle_count *
-                            user_config.cake_speed_multiplier,
-                .logical_index = logical_index,
+            return (chase_animation_sample_t){
+                .rotation = chase->sync_cycle_count * speed_multiplier,
+                .logical_index = (uint16_t)(
+                    ((uint32_t)current_phase * logical_led_count) /
+                    OUTPUT_LED_COUNT),
                 .step_progress = 0,
             };
         }
@@ -1069,18 +1068,16 @@ static cake_animation_sample_t cake_chase_sample(absolute_time_t now) {
         const uint64_t outer_progress_us =
             (uint64_t)current_phase * phase_duration_us + elapsed_us;
         const uint64_t scaled_progress_us =
-            outer_progress_us * user_config.cake_speed_multiplier;
+            outer_progress_us * speed_multiplier;
         completed_rotations =
-            (uint64_t)cake_chase.sync_cycle_count *
-                user_config.cake_speed_multiplier +
+            (uint64_t)chase->sync_cycle_count * speed_multiplier +
             scaled_progress_us / rotation_duration_us;
-        rotation_progress_us =
-            scaled_progress_us % rotation_duration_us;
+        rotation_progress_us = scaled_progress_us % rotation_duration_us;
     }
 
     const uint64_t pixel_progress =
-        rotation_progress_us * user_config.cake_led_count;
-    return (cake_animation_sample_t){
+        rotation_progress_us * logical_led_count;
+    return (chase_animation_sample_t){
         .rotation = (uint32_t)completed_rotations,
         .logical_index =
             (uint16_t)(pixel_progress / rotation_duration_us),
@@ -1088,6 +1085,14 @@ static cake_animation_sample_t cake_chase_sample(absolute_time_t now) {
             ((pixel_progress % rotation_duration_us) * 255u) /
             rotation_duration_us),
     };
+}
+
+// Sample the Cake animation using its configured clock and physical LED count.
+static chase_animation_sample_t cake_chase_sample(absolute_time_t now) {
+    return chase_animation_sample(
+        &cake_chase, now, user_config.cake_timing_mode,
+        user_config.cake_rotation_ms, user_config.cake_speed_multiplier,
+        user_config.cake_led_count);
 }
 
 // Apply the configured Cake start offset and direction to a logical index.
@@ -1235,7 +1240,7 @@ static void update_cyclotron_chase(const diagnostic_frame_t *frame,
     if (brightness == 0) {
         cyclotron_chase.initialized = false;
         cyclotron_chase.output_valid = false;
-        cyclotron_chase.source_brightness = 0;
+        cyclotron_chase.brightness = 0;
         return;
     }
 
@@ -1270,77 +1275,18 @@ static void update_cyclotron_chase(const diagnostic_frame_t *frame,
         cyclotron_chase.output_valid = false;
     }
 
-    cyclotron_chase.source_brightness =
+    cyclotron_chase.brightness =
         user_config.cyclotron_timing_mode == CAKE_TIMING_FREE
             ? UINT8_MAX
             : source_phase_brightness(frame, phase);
 }
 
-// Convert the cyclotron's synchronized or free-running clock into a logical
-// window, fractional step progress, and completed-rotation count.
-static cyclotron_animation_sample_t cyclotron_chase_sample(
-    absolute_time_t now) {
-    uint64_t rotation_progress_us = 0;
-    uint64_t rotation_duration_us = 0;
-    uint64_t completed_rotations = 0;
-
-    if (user_config.cyclotron_timing_mode == CAKE_TIMING_FREE) {
-        rotation_duration_us =
-            (uint64_t)user_config.cyclotron_rotation_ms * 1000u;
-        const int64_t measured_us =
-            absolute_time_diff_us(cyclotron_chase.free_started_at, now);
-        const uint64_t elapsed_us =
-            measured_us > 0 ? (uint64_t)measured_us : 0u;
-        completed_rotations = elapsed_us / rotation_duration_us;
-        rotation_progress_us = elapsed_us % rotation_duration_us;
-    } else {
-        const uint8_t current_phase = cyclotron_chase.current_phase;
-        uint32_t phase_duration_us = cyclotron_chase.fallback_duration_us;
-        if ((cyclotron_chase.valid_duration_mask & (1u << current_phase)) != 0) {
-            phase_duration_us =
-                cyclotron_chase.phase_duration_us[current_phase];
-        }
-        uint64_t elapsed_us = 0;
-        if (phase_duration_us > 0) {
-            const int64_t measured_us =
-                absolute_time_diff_us(cyclotron_chase.phase_started_at, now);
-            if (measured_us > 0) elapsed_us = (uint64_t)measured_us;
-            if (elapsed_us >= phase_duration_us) {
-                elapsed_us = phase_duration_us - 1u;
-            }
-        }
-        rotation_duration_us =
-            (uint64_t)OUTPUT_LED_COUNT * phase_duration_us;
-        if (rotation_duration_us == 0) {
-            return (cyclotron_animation_sample_t){
-                .rotation = cyclotron_chase.sync_cycle_count *
-                            user_config.cyclotron_speed_multiplier,
-                .logical_index = cyclotron_chase.current_phase %
-                                 OUTPUT_LED_COUNT,
-                .step_progress = 0,
-            };
-        }
-        const uint64_t outer_progress_us =
-            (uint64_t)current_phase * phase_duration_us + elapsed_us;
-        const uint64_t scaled_progress_us =
-            outer_progress_us * user_config.cyclotron_speed_multiplier;
-        completed_rotations =
-            (uint64_t)cyclotron_chase.sync_cycle_count *
-                user_config.cyclotron_speed_multiplier +
-            scaled_progress_us / rotation_duration_us;
-        rotation_progress_us = scaled_progress_us % rotation_duration_us;
-    }
-
-    const uint64_t pixel_progress =
-        rotation_progress_us * OUTPUT_LED_COUNT;
-    return (cyclotron_animation_sample_t){
-        .rotation = (uint32_t)completed_rotations,
-        .logical_index =
-            (uint16_t)(pixel_progress / rotation_duration_us),
-        .step_progress = (uint8_t)(
-            ((pixel_progress % rotation_duration_us) * 255u) /
-            rotation_duration_us),
-    };
+// Sample the cyclotron animation across its four logical window positions.
+static chase_animation_sample_t cyclotron_chase_sample(absolute_time_t now) {
+    return chase_animation_sample(
+        &cyclotron_chase, now, user_config.cyclotron_timing_mode,
+        user_config.cyclotron_rotation_ms,
+        user_config.cyclotron_speed_multiplier, OUTPUT_LED_COUNT);
 }
 
 // Record the earliest legal start time for the next cyclotron frame, including
@@ -1379,7 +1325,7 @@ static void refresh_cyclotron_output(PIO pio, uint sm,
     // leaving the cyclotron WS2812 chain latched on its trail pair.
     now = wait_for_cyclotron_frame_boundary(pio, sm);
 
-    const cyclotron_animation_sample_t sample =
+    const chase_animation_sample_t sample =
         cyclotron_chase_sample(now);
     const uint16_t active_index =
         cyclotron_physical_led_index(sample.logical_index);
@@ -1393,7 +1339,7 @@ static void refresh_cyclotron_output(PIO pio, uint sm,
             : 0;
     if (cyclotron_chase.output_valid &&
         active_index == cyclotron_chase.output_led_index &&
-        cyclotron_chase.source_brightness ==
+        cyclotron_chase.brightness ==
             cyclotron_chase.output_brightness &&
         effect_level == cyclotron_chase.output_effect_level &&
         rendered_rotation == cyclotron_chase.output_rotation) {
@@ -1426,11 +1372,11 @@ static void refresh_cyclotron_output(PIO pio, uint sm,
         pio_sm_put_blocking(
             pio, sm,
             packed_cyclotron_pixel(color->red, color->green, color->blue,
-                                   scale_channel(cyclotron_chase.source_brightness,
+                                   scale_channel(cyclotron_chase.brightness,
                                                  effect_brightness)) << 8);
     }
     cyclotron_chase.output_led_index = active_index;
-    cyclotron_chase.output_brightness = cyclotron_chase.source_brightness;
+    cyclotron_chase.output_brightness = cyclotron_chase.brightness;
     cyclotron_chase.output_effect_level = effect_level;
     cyclotron_chase.output_rotation = rendered_rotation;
     cyclotron_chase.output_valid = true;
@@ -1539,7 +1485,7 @@ static void refresh_cake_output(PIO pio, uint sm, absolute_time_t now) {
         return;
     }
 
-    const cake_animation_sample_t sample = cake_chase_sample(now);
+    const chase_animation_sample_t sample = cake_chase_sample(now);
     const uint16_t active_index =
         cake_physical_led_index(sample.logical_index);
     const uint8_t effect_level =
@@ -2230,6 +2176,295 @@ static void diagnostics_core(void) {
     }
 }
 
+// Initialize all core-0 deadlines while leaving counters and debounce flags at
+// their zero-valued startup state.
+static void initialize_runtime_state(runtime_state_t *state) {
+    memset(state, 0, sizeof(*state));
+    state->last_pixel_time = get_absolute_time();
+    state->next_idle_off =
+        delayed_by_ms(state->last_pixel_time, INPUT_IDLE_OFF_MS);
+    state->next_button_poll = get_absolute_time();
+    state->button_changed_at = get_absolute_time();
+    state->button_pressed_at = get_absolute_time();
+    state->next_lid_poll = get_absolute_time();
+    state->lid_changed_at = get_absolute_time();
+    state->next_cyclotron_refresh = get_absolute_time();
+    state->next_cake_refresh = get_absolute_time();
+    state->color_save_at = at_the_end_of_time;
+    state->config_flash_at = at_the_end_of_time;
+}
+
+// Consume one complete GRB word from the PIO RX FIFO. Returning true tells the
+// event loop to immediately check for another pixel before servicing timers.
+static bool capture_input_pixel(PIO pio, uint rx_sm,
+                                runtime_state_t *state) {
+    if (pio_sm_is_rx_fifo_empty(pio, rx_sm)) {
+        return false;
+    }
+
+    const uint32_t input_grb = pio_sm_get(pio, rx_sm) & 0x00ffffffu;
+    if (capture_frame.pixel_count < MAX_FRAME_PIXELS) {
+        capture_frame.pixels[capture_frame.pixel_count++] = input_grb;
+    } else {
+        capture_frame.truncated = true;
+    }
+    state->last_pixel_time = get_absolute_time();
+    state->receiving_frame = true;
+    return true;
+}
+
+// Detect the input reset gap, finalize diagnostics, and map a complete Hasbro
+// frame to both output chains when preview and LED tests are not overriding it.
+static void finish_input_frame(PIO pio, uint rx_sm, uint rx_offset,
+                               uint cyclotron_sm, uint cake_sm,
+                               runtime_state_t *state) {
+    if (!state->receiving_frame ||
+        absolute_time_diff_us(state->last_pixel_time, get_absolute_time()) <
+            WS2812_RESET_US) {
+        return;
+    }
+
+    capture_frame.number = ++state->frame_number;
+    restart_ws2812_rx(pio, rx_sm, rx_offset);
+    capture_frame.color_index = user_config.outer_color_index;
+    capture_frame.lid_state = lid_bypass_active()
+                                  ? LID_STATE_BYPASSED
+                                  : state->lid_closed ? LID_STATE_CLOSED
+                                                      : LID_STATE_OPEN;
+    if (state->config_flash_phase == 0) {
+        const absolute_time_t frame_time = get_absolute_time();
+        if (capture_frame.pixel_count == HASBRO_INPUT_PIXELS) {
+            state->next_idle_off =
+                delayed_by_ms(frame_time, INPUT_IDLE_OFF_MS);
+        }
+        if (!preview_active) {
+            if (!cyclotron_test_active) {
+                output_cyclotron_frame(pio, cyclotron_sm, &capture_frame);
+            }
+            if (!cake_test_active) {
+                output_cake_frame(pio, cake_sm, &capture_frame, frame_time);
+            }
+        }
+    }
+#if ENABLE_USB_DIAGNOSTICS
+    queue_try_add(&diagnostic_queue, &capture_frame);
+#endif
+    capture_frame.pixel_count = 0;
+    capture_frame.truncated = false;
+    state->receiving_frame = false;
+}
+
+// Execute at most one queued USB request between captured input frames.
+static void service_config_request(PIO pio, uint cyclotron_sm, uint cake_sm,
+                                   const runtime_state_t *state) {
+    config_request_t request;
+    if (!state->receiving_frame &&
+        queue_try_remove(&config_request_queue, &request)) {
+        process_config_request(pio, cyclotron_sm, cake_sm, &request);
+    }
+}
+
+// Expire temporary LED tests and make their normal render paths eligible to
+// redraw on the next frame or refresh deadline.
+static void service_test_deadlines(PIO pio, uint cyclotron_sm) {
+    if (cyclotron_test_active && time_reached(cyclotron_test_until)) {
+        cyclotron_test_active = false;
+        output_cyclotron_off(pio, cyclotron_sm);
+    }
+    if (cake_test_active && time_reached(cake_test_until)) {
+        cake_test_active = false;
+        cake_chase.output_valid = false;
+    }
+}
+
+// Latch one all-off frame after the source has been idle long enough, while
+// preserving an active preview, LED test, or button-confirmation animation.
+static void service_idle_outputs(PIO pio, uint cyclotron_sm, uint cake_sm,
+                                 runtime_state_t *state) {
+    if (state->config_flash_phase != 0 || preview_active ||
+        !time_reached(state->next_idle_off)) {
+        return;
+    }
+
+    const absolute_time_t now = get_absolute_time();
+    state->next_idle_off = delayed_by_ms(now, INPUT_IDLE_OFF_MS);
+    if (!cyclotron_test_active) {
+        memset(&cyclotron_chase, 0, sizeof(cyclotron_chase));
+        output_cyclotron_off(pio, cyclotron_sm);
+    }
+    if (!cake_test_active) {
+        memset(&cake_chase, 0, sizeof(cake_chase));
+        output_cake_off(pio, cake_sm);
+    }
+}
+
+// Service preview and live animation refreshes from their independent 5 ms
+// deadlines without changing the source-frame processing order.
+static void service_animation_refresh(PIO pio, uint cyclotron_sm, uint cake_sm,
+                                      runtime_state_t *state) {
+    if (state->config_flash_phase != 0) {
+        return;
+    }
+
+    if (preview_active &&
+        (time_reached(state->next_cake_refresh) ||
+         time_reached(state->next_cyclotron_refresh))) {
+        const absolute_time_t now = get_absolute_time();
+        const bool refresh_cake = time_reached(state->next_cake_refresh);
+        const bool refresh_cyclotron =
+            time_reached(state->next_cyclotron_refresh);
+        if (refresh_cake) {
+            state->next_cake_refresh = delayed_by_ms(now, CAKE_REFRESH_MS);
+        }
+        if (refresh_cyclotron) {
+            state->next_cyclotron_refresh =
+                delayed_by_ms(now, CAKE_REFRESH_MS);
+        }
+        run_preview_output(pio, cyclotron_sm, cake_sm, now, refresh_cake,
+                           refresh_cyclotron);
+    }
+
+    if (!preview_active && !cake_test_active &&
+        time_reached(state->next_cake_refresh)) {
+        const absolute_time_t now = get_absolute_time();
+        state->next_cake_refresh = delayed_by_ms(now, CAKE_REFRESH_MS);
+        refresh_cake_output(pio, cake_sm, now);
+    }
+
+    const bool cyclotron_needs_periodic_refresh =
+        user_config.cyclotron_timing_mode == CAKE_TIMING_FREE ||
+        user_config.cyclotron_speed_multiplier != 1 ||
+        user_config.cyclotron_effect != CAKE_EFFECT_SOLID;
+    if (!preview_active && !cyclotron_test_active &&
+        cyclotron_needs_periodic_refresh &&
+        time_reached(state->next_cyclotron_refresh)) {
+        const absolute_time_t now = get_absolute_time();
+        state->next_cyclotron_refresh =
+            delayed_by_ms(now, CAKE_REFRESH_MS);
+        refresh_cyclotron_output(pio, cyclotron_sm, now);
+    }
+}
+
+// Debounce the lid sense input and mirror its stable state to the open-drain
+// output unless the saved or compile-time bypass is active.
+static void service_lid_switch(runtime_state_t *state) {
+    if (lid_bypass_active() || !time_reached(state->next_lid_poll)) {
+        return;
+    }
+
+    state->next_lid_poll =
+        delayed_by_ms(state->next_lid_poll, LID_POLL_MS);
+    const bool closed = !gpio_get(LID_SENSE_PIN);
+    if (closed != state->lid_raw_closed) {
+        state->lid_raw_closed = closed;
+        state->lid_changed_at = get_absolute_time();
+    } else if (closed != state->lid_closed &&
+               absolute_time_diff_us(state->lid_changed_at,
+                                     get_absolute_time()) >=
+                   LID_DEBOUNCE_MS * 1000u) {
+        state->lid_closed = closed;
+        set_lid_output(state->lid_closed);
+    }
+}
+
+// Debounce BOOTSEL, cycle the cyclotron palette on a short press, and toggle
+// lid bypass plus its confirmation animation on a long press.
+static void service_bootsel_button(PIO pio, uint cyclotron_sm, uint cake_sm,
+                                   runtime_state_t *state) {
+    if (!time_reached(state->next_button_poll)) {
+        return;
+    }
+
+    state->next_button_poll =
+        delayed_by_ms(state->next_button_poll, BUTTON_POLL_MS);
+    const bool pressed = read_bootsel_pressed();
+    if (pressed != state->button_raw_pressed) {
+        state->button_raw_pressed = pressed;
+        state->button_changed_at = get_absolute_time();
+    } else if (pressed != state->button_pressed &&
+               absolute_time_diff_us(state->button_changed_at,
+                                     get_absolute_time()) >=
+                   BUTTON_DEBOUNCE_MS * 1000u) {
+        state->button_pressed = pressed;
+        if (state->button_pressed) {
+            state->button_pressed_at = get_absolute_time();
+            state->button_long_press_handled = false;
+        } else if (!state->button_long_press_handled) {
+            user_config.outer_color_index =
+                (user_config.outer_color_index + 1) % OUTPUT_COLOR_COUNT;
+            state->color_save_at =
+                delayed_by_ms(get_absolute_time(), COLOR_SAVE_DELAY_MS);
+            state->color_save_pending = true;
+        }
+    }
+
+    if (!state->button_pressed || state->button_long_press_handled ||
+        absolute_time_diff_us(state->button_pressed_at, get_absolute_time()) <
+            BUTTON_LONG_PRESS_MS * 1000u) {
+        return;
+    }
+
+    state->button_long_press_handled = true;
+    user_config.lid_bypass = user_config.lid_bypass == 0 ? 1 : 0;
+    if (lid_bypass_active()) {
+        set_lid_output(true);
+    } else {
+        state->lid_raw_closed = false;
+        state->lid_closed = false;
+        state->lid_changed_at = get_absolute_time();
+        state->next_lid_poll = get_absolute_time();
+        set_lid_output(false);
+    }
+
+    output_all_red(pio, cyclotron_sm, true);
+    output_cake_off(pio, cake_sm);
+    state->config_flash_phase = 1;
+    state->config_flash_at =
+        delayed_by_ms(get_absolute_time(), CONFIG_FLASH_ON_MS);
+    state->color_save_at =
+        delayed_by_ms(get_absolute_time(), COLOR_SAVE_DELAY_MS);
+    state->color_save_pending = true;
+}
+
+// Advance the non-blocking two-flash confirmation shown after a long press.
+static void service_config_flash(PIO pio, uint cyclotron_sm,
+                                 runtime_state_t *state) {
+    if (state->config_flash_phase == 0 ||
+        !time_reached(state->config_flash_at)) {
+        return;
+    }
+
+    if (state->config_flash_phase == 1) {
+        output_all_red(pio, cyclotron_sm, false);
+        state->config_flash_phase = 2;
+        state->config_flash_at =
+            delayed_by_ms(get_absolute_time(), CONFIG_FLASH_OFF_MS);
+    } else if (state->config_flash_phase == 2) {
+        output_all_red(pio, cyclotron_sm, true);
+        state->config_flash_phase = 3;
+        state->config_flash_at =
+            delayed_by_ms(get_absolute_time(), CONFIG_FLASH_ON_MS);
+    } else {
+        output_all_red(pio, cyclotron_sm, false);
+        state->config_flash_phase = 0;
+    }
+}
+
+// Coalesce rapid button changes and retry a failed journal write later.
+static void service_pending_save(runtime_state_t *state) {
+    if (!state->color_save_pending || state->button_pressed ||
+        !time_reached(state->color_save_at)) {
+        return;
+    }
+
+    if (save_user_setting()) {
+        state->color_save_pending = false;
+    } else {
+        state->color_save_at =
+            delayed_by_ms(get_absolute_time(), COLOR_SAVE_DELAY_MS);
+    }
+}
+
 // Initialize hardware and run the core-0 event loop that captures WS2812 input,
 // services LED output deadlines, handles controls, and persists settings.
 int main(void) {
@@ -2292,262 +2527,28 @@ int main(void) {
            user_config.cake_blue);
 #endif
 
-    // Runtime state for frame boundaries, debounced controls, deferred flash
-    // writes, and the visual confirmation sequence.
-    uint32_t frame_number = 0;
-    absolute_time_t last_pixel_time = get_absolute_time();
-    absolute_time_t next_idle_off =
-        delayed_by_ms(last_pixel_time, INPUT_IDLE_OFF_MS);
-    absolute_time_t next_button_poll = get_absolute_time();
-    absolute_time_t button_changed_at = get_absolute_time();
-    absolute_time_t button_pressed_at = get_absolute_time();
-    absolute_time_t next_lid_poll = get_absolute_time();
-    absolute_time_t lid_changed_at = get_absolute_time();
-    absolute_time_t next_cyclotron_refresh = get_absolute_time();
-    absolute_time_t next_cake_refresh = get_absolute_time();
-    absolute_time_t color_save_at = at_the_end_of_time;
-    absolute_time_t config_flash_at = at_the_end_of_time;
-    bool receiving_frame = false;
-    bool button_raw_pressed = false;
-    bool button_pressed = false;
-    bool button_long_press_handled = false;
-    bool lid_raw_closed = false;
-    bool lid_closed = false;
-    bool color_save_pending = false;
-    uint8_t config_flash_phase = 0;
+    runtime_state_t runtime;
+    initialize_runtime_state(&runtime);
 
     while (true) {
-        // Capture every complete GRB pixel pushed by the RX state machine.
-        if (!pio_sm_is_rx_fifo_empty(pio, rx_sm)) {
-            // RX autopushes once per complete 24-bit GRB pixel. The complete
-            // frame is retained so the Hasbro address groups can be mapped.
-            const uint32_t input_grb =
-                pio_sm_get(pio, rx_sm) & 0x00ffffffu;
-
-            if (capture_frame.pixel_count < MAX_FRAME_PIXELS) {
-                capture_frame.pixels[capture_frame.pixel_count++] = input_grb;
-            } else {
-                capture_frame.truncated = true;
-            }
-            last_pixel_time = get_absolute_time();
-            receiving_frame = true;
+        if (capture_input_pixel(pio, rx_sm, &runtime)) {
             continue;
         }
 
-        // Treat the WS2812 reset-length idle gap as the end of the frame,
-        // then map and transmit it to both output chains.
-        if (receiving_frame &&
-            absolute_time_diff_us(last_pixel_time, get_absolute_time()) >=
-                WS2812_RESET_US) {
-            capture_frame.number = ++frame_number;
-            restart_ws2812_rx(pio, rx_sm, rx_offset);
-            capture_frame.color_index = user_config.outer_color_index;
-            capture_frame.lid_state = lid_bypass_active()
-                                          ? LID_STATE_BYPASSED
-                                          : lid_closed ? LID_STATE_CLOSED
-                                                       : LID_STATE_OPEN;
-            if (config_flash_phase == 0) {
-                const absolute_time_t frame_time = get_absolute_time();
-                if (capture_frame.pixel_count == HASBRO_INPUT_PIXELS) {
-                    next_idle_off =
-                        delayed_by_ms(frame_time, INPUT_IDLE_OFF_MS);
-                }
-                if (!preview_active) {
-                    if (!cyclotron_test_active) {
-                        output_cyclotron_frame(pio, tx_sm, &capture_frame);
-                    }
-                    if (!cake_test_active) {
-                        output_cake_frame(pio, cake_tx_sm, &capture_frame,
-                                          frame_time);
-                    }
-                }
-            }
-#if ENABLE_USB_DIAGNOSTICS
-            queue_try_add(&diagnostic_queue, &capture_frame);
-#endif
-            capture_frame.pixel_count = 0;
-            capture_frame.truncated = false;
-            receiving_frame = false;
-        }
-
-        config_request_t config_request;
-        if (!receiving_frame &&
-            queue_try_remove(&config_request_queue, &config_request)) {
-            process_config_request(
-                pio, tx_sm, cake_tx_sm, &config_request);
-        }
-
-        if (cyclotron_test_active &&
-            time_reached(cyclotron_test_until)) {
-            cyclotron_test_active = false;
-            output_cyclotron_off(pio, tx_sm);
-        }
-
-        if (cake_test_active && time_reached(cake_test_until)) {
-            cake_test_active = false;
-            cake_chase.output_valid = false;
-        }
-
-        // WS2812 pixels latch their last state. If the source disappears
-        // without sending an all-off frame, latch one explicit zero frame.
-        // output_cyclotron_off() suppresses further zero-frame traffic until
-        // an illuminated frame has actually been sent.
-        if (config_flash_phase == 0 && !preview_active &&
-            time_reached(next_idle_off)) {
-            const absolute_time_t now = get_absolute_time();
-            next_idle_off = delayed_by_ms(now, INPUT_IDLE_OFF_MS);
-            if (!cyclotron_test_active) {
-                memset(&cyclotron_chase, 0, sizeof(cyclotron_chase));
-                output_cyclotron_off(pio, tx_sm);
-            }
-            if (!cake_test_active) {
-                memset(&cake_chase, 0, sizeof(cake_chase));
-                output_cake_off(pio, cake_tx_sm);
-            }
-        }
-
-        // Refresh from the measured phase clock even when the source frame is
-        // unchanged. TX readiness guarantees a reset-low latch between frames.
-        if (config_flash_phase == 0 && preview_active &&
-            (time_reached(next_cake_refresh) ||
-             time_reached(next_cyclotron_refresh))) {
-            const absolute_time_t now = get_absolute_time();
-            const bool refresh_cake = time_reached(next_cake_refresh);
-            const bool refresh_cyclotron =
-                time_reached(next_cyclotron_refresh);
-            if (refresh_cake) {
-                next_cake_refresh = delayed_by_ms(now, CAKE_REFRESH_MS);
-            }
-            if (refresh_cyclotron) {
-                next_cyclotron_refresh = delayed_by_ms(now, CAKE_REFRESH_MS);
-            }
-            run_preview_output(pio, tx_sm, cake_tx_sm, now, refresh_cake,
-                               refresh_cyclotron);
-        }
-
-        if (config_flash_phase == 0 && !preview_active &&
-            !cake_test_active &&
-            time_reached(next_cake_refresh)) {
-            const absolute_time_t now = get_absolute_time();
-            next_cake_refresh = delayed_by_ms(now, CAKE_REFRESH_MS);
-            refresh_cake_output(pio, cake_tx_sm, now);
-        }
-
-        if (config_flash_phase == 0 && !preview_active &&
-            !cyclotron_test_active &&
-            (user_config.cyclotron_timing_mode == CAKE_TIMING_FREE ||
-             user_config.cyclotron_speed_multiplier != 1 ||
-             user_config.cyclotron_effect != CAKE_EFFECT_SOLID) &&
-            time_reached(next_cyclotron_refresh)) {
-            const absolute_time_t now = get_absolute_time();
-            next_cyclotron_refresh = delayed_by_ms(now, CAKE_REFRESH_MS);
-            refresh_cyclotron_output(pio, tx_sm, now);
-        }
-
-        // Debounce the lid input and mirror it through the open-drain output.
-        if (!lid_bypass_active() && time_reached(next_lid_poll)) {
-            next_lid_poll = delayed_by_ms(next_lid_poll, LID_POLL_MS);
-            const bool closed = !gpio_get(LID_SENSE_PIN);
-            if (closed != lid_raw_closed) {
-                lid_raw_closed = closed;
-                lid_changed_at = get_absolute_time();
-            } else if (closed != lid_closed &&
-                       absolute_time_diff_us(lid_changed_at,
-                                             get_absolute_time()) >=
-                           LID_DEBOUNCE_MS * 1000u) {
-                lid_closed = closed;
-                set_lid_output(lid_closed);
-            }
-        }
-
-        // A short BOOTSEL press cycles colors; a long press toggles lid bypass.
-        if (time_reached(next_button_poll)) {
-            next_button_poll = delayed_by_ms(next_button_poll, BUTTON_POLL_MS);
-            const bool pressed = read_bootsel_pressed();
-            if (pressed != button_raw_pressed) {
-                button_raw_pressed = pressed;
-                button_changed_at = get_absolute_time();
-            } else if (pressed != button_pressed &&
-                       absolute_time_diff_us(button_changed_at,
-                                             get_absolute_time()) >=
-                           BUTTON_DEBOUNCE_MS * 1000u) {
-                button_pressed = pressed;
-                if (button_pressed) {
-                    button_pressed_at = get_absolute_time();
-                    button_long_press_handled = false;
-                } else if (!button_long_press_handled) {
-                    user_config.outer_color_index =
-                        (user_config.outer_color_index + 1) %
-                        OUTPUT_COLOR_COUNT;
-                    color_save_at = delayed_by_ms(get_absolute_time(),
-                                                  COLOR_SAVE_DELAY_MS);
-                    color_save_pending = true;
-                }
-            }
-
-            if (button_pressed && !button_long_press_handled &&
-                absolute_time_diff_us(button_pressed_at,
-                                      get_absolute_time()) >=
-                    BUTTON_LONG_PRESS_MS * 1000u) {
-                button_long_press_handled = true;
-                user_config.lid_bypass =
-                    user_config.lid_bypass == 0 ? 1 : 0;
-
-                if (lid_bypass_active()) {
-                    set_lid_output(true);
-                } else {
-                    // Return to the default floating state, then debounce
-                    // GPIO4 before allowing it to pull the output low.
-                    lid_raw_closed = false;
-                    lid_closed = false;
-                    lid_changed_at = get_absolute_time();
-                    next_lid_poll = get_absolute_time();
-                    set_lid_output(false);
-                }
-
-                output_all_red(pio, tx_sm, true);
-                output_cake_off(pio, cake_tx_sm);
-                config_flash_phase = 1;
-                config_flash_at = delayed_by_ms(get_absolute_time(),
-                                                CONFIG_FLASH_ON_MS);
-                color_save_at = delayed_by_ms(get_absolute_time(),
-                                              COLOR_SAVE_DELAY_MS);
-                color_save_pending = true;
-            }
-        }
-
-        // Advance the non-blocking two-flash confirmation animation.
-        if (config_flash_phase != 0 && time_reached(config_flash_at)) {
-            if (config_flash_phase == 1) {
-                output_all_red(pio, tx_sm, false);
-                config_flash_phase = 2;
-                config_flash_at = delayed_by_ms(get_absolute_time(),
-                                                CONFIG_FLASH_OFF_MS);
-            } else if (config_flash_phase == 2) {
-                output_all_red(pio, tx_sm, true);
-                config_flash_phase = 3;
-                config_flash_at = delayed_by_ms(get_absolute_time(),
-                                                CONFIG_FLASH_ON_MS);
-            } else {
-                output_all_red(pio, tx_sm, false);
-                config_flash_phase = 0;
-            }
-        }
-
-        // Coalesce rapid setting changes before committing them to flash.
-        if (color_save_pending && !button_pressed &&
-            time_reached(color_save_at)) {
-            if (save_user_setting()) {
-                color_save_pending = false;
-            } else {
-                color_save_at = delayed_by_ms(get_absolute_time(),
-                                              COLOR_SAVE_DELAY_MS);
-            }
-        }
+        finish_input_frame(pio, rx_sm, rx_offset, tx_sm, cake_tx_sm,
+                           &runtime);
+        service_config_request(pio, tx_sm, cake_tx_sm, &runtime);
+        service_test_deadlines(pio, tx_sm);
+        service_idle_outputs(pio, tx_sm, cake_tx_sm, &runtime);
+        service_animation_refresh(pio, tx_sm, cake_tx_sm, &runtime);
+        service_lid_switch(&runtime);
+        service_bootsel_button(pio, tx_sm, cake_tx_sm, &runtime);
+        service_config_flash(pio, tx_sm, &runtime);
+        service_pending_save(&runtime);
 
         // Stay responsive during a frame; otherwise sleep until RX or a poll
         // timer interrupt requires attention.
-        if (receiving_frame) {
+        if (runtime.receiving_frame) {
             tight_loop_contents();
         } else {
             sleep_until_input_or_timer(pio, rx_sm);

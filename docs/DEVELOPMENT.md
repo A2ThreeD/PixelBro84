@@ -116,6 +116,24 @@ Use Chrome or Edge on `localhost` because Web Serial requires a supported
 browser and a secure context. Only one application may hold the serial port at
 a time; close serial terminals before connecting from the configurator.
 
+## Firmware runtime architecture
+
+Core 0 owns WS2812 input capture, both PIO transmitters, runtime configuration,
+button/lid state, and flash-setting requests. Its event loop preserves this
+service order after input capture: finish a source frame, process one USB
+request, expire tests, clear idle outputs, refresh animations, poll controls,
+advance confirmation feedback, and save deferred settings.
+
+Core 1 owns USB command assembly and optional diagnostic output so serial work
+does not delay frame capture. Requests and responses cross cores through fixed
+queues; hardware and flash mutations stay on core 0.
+
+Cake and cyclotron outputs share the phase-clock state and animation sampling
+math. Their physical index mapping, color selection, effect rendering, chain
+length, bit rate, and PIO pacing remain separate. Keep that boundary when
+adding effects so common timing fixes apply to both outputs without coupling
+their hardware-specific frame generation.
+
 ## Required compatibility checks
 
 For a change that touches the protocol or settings, test at least:

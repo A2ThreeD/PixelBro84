@@ -2,7 +2,7 @@
 
 | Project field | Value |
 | --- | --- |
-| Version | 1.2.2 |
+| Version | 1.3.0 |
 | Release date | August 10, 2026 |
 | Programmer | Aaron Morris |
 | Company | A2ThreeD |

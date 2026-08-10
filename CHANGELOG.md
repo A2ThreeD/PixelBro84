@@ -2,6 +2,14 @@
 
 All notable project changes are documented here.
 
+## [1.3.0] - 2026-08-10
+
+- Split the core-0 event loop into focused input, output, control, preview,
+  test, and persistence service functions while retaining their execution
+  order and timing behavior.
+- Unified the Cake and cyclotron chase state and animation sampling math while
+  keeping their physical LED mapping, color, effect, and PIO renderers separate.
+
 ## [1.2.2] - 2026-08-10
 
 - Consolidated the 1.2.2–1.2.6 development fixes into this release.

@@ -2,7 +2,7 @@
  * Project:    PixelBro84
  * Programmer: Aaron Morris
  * Company:    A2ThreeD
- * Version:    1.2.2
+ * Version:    1.3.0
  * Date:       2026-08-10
  *
  * Copyright (c) 2026 Aaron Morris / A2ThreeD.
@@ -31,14 +31,14 @@
 
 // Keep the numeric components and display string synchronized for releases.
 #define PROJECT_VERSION_MAJOR 1
-#define PROJECT_VERSION_MINOR 2
-#define PROJECT_VERSION_PATCH 2
-#define PROJECT_VERSION_STRING "1.2.2"
+#define PROJECT_VERSION_MINOR 3
+#define PROJECT_VERSION_PATCH 0
+#define PROJECT_VERSION_STRING "1.3.0"
 #define PROJECT_RELEASE_DATE "2026-08-10"
 
 // License and release summary reported by the Pico binary metadata.
 #define PROJECT_LICENSE "PolyForm-Noncommercial-1.0.0"
 #define PROJECT_CHANGE_SUMMARY \
-    "Consolidated cyclotron tests and input-independent preview fixes"
+    "Refactored runtime services and shared chase timing"
 
 #endif
