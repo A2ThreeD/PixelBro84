@@ -3,7 +3,7 @@
 | Project field | Value |
 | --- | --- |
 | Version | 1.3.0 |
-| Release date | August 10, 2026 |
+| Release date | August 11, 2026 |
 | Programmer | Aaron Morris |
 | Company | A2ThreeD |
 
@@ -109,6 +109,11 @@ installed/closed. GPIO28 mirrors that state as an open-drain-style output:
 - Lid closed: GPIO28 actively drives low.
 - Lid open: GPIO28 is an input with pulls disabled, so it is high-impedance.
 - At startup: GPIO28 defaults to high-impedance until a closed lid is debounced.
+
+Unless lid bypass is enabled, both the cyclotron and Cake animations remain
+dark while the lid is open (GPIO4 floating/high) and resume when the lid is
+closed (GPIO4 grounded/low). Individual LED tests remain available with the
+lid open so wiring and pixel order can still be checked during installation.
 
 GPIO28 never drives high. To bypass lid detection and keep GPIO28 low, change
 this setting near the top of `src/main.c`:

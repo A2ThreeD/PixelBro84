@@ -435,6 +435,12 @@ static bool lid_bypass_active(void) {
     return LID_DETECTION_BYPASS || user_config.lid_bypass != 0;
 }
 
+// Normal and preview animations run only with a closed lid unless the saved
+// or compile-time bypass explicitly overrides the physical lid switch.
+static bool lid_allows_animation(const runtime_state_t *state) {
+    return lid_bypass_active() || state->lid_closed;
+}
+
 // Initialize the lid sense input and its open-drain-style mirrored output.
 static void lid_switch_init(void) {
     gpio_init(LID_OUTPUT_PIN);
@@ -2214,7 +2220,7 @@ static bool capture_input_pixel(PIO pio, uint rx_sm,
 }
 
 // Detect the input reset gap, finalize diagnostics, and map a complete Hasbro
-// frame to both output chains when preview and LED tests are not overriding it.
+// frame when the lid permits animation and tests are not overriding outputs.
 static void finish_input_frame(PIO pio, uint rx_sm, uint rx_offset,
                                uint cyclotron_sm, uint cake_sm,
                                runtime_state_t *state) {
@@ -2237,7 +2243,7 @@ static void finish_input_frame(PIO pio, uint rx_sm, uint rx_offset,
             state->next_idle_off =
                 delayed_by_ms(frame_time, INPUT_IDLE_OFF_MS);
         }
-        if (!preview_active) {
+        if (!preview_active && lid_allows_animation(state)) {
             if (!cyclotron_test_active) {
                 output_cyclotron_frame(pio, cyclotron_sm, &capture_frame);
             }
@@ -2264,16 +2270,17 @@ static void service_config_request(PIO pio, uint cyclotron_sm, uint cake_sm,
     }
 }
 
-// Expire temporary LED tests and make their normal render paths eligible to
-// redraw on the next frame or refresh deadline.
-static void service_test_deadlines(PIO pio, uint cyclotron_sm) {
+// Expire temporary LED tests, latch their chains off, and make normal render
+// paths eligible to redraw when animation is allowed.
+static void service_test_deadlines(PIO pio, uint cyclotron_sm,
+                                   uint cake_sm) {
     if (cyclotron_test_active && time_reached(cyclotron_test_until)) {
         cyclotron_test_active = false;
         output_cyclotron_off(pio, cyclotron_sm);
     }
     if (cake_test_active && time_reached(cake_test_until)) {
         cake_test_active = false;
-        cake_chase.output_valid = false;
+        output_cake_off(pio, cake_sm);
     }
 }
 
@@ -2302,7 +2309,7 @@ static void service_idle_outputs(PIO pio, uint cyclotron_sm, uint cake_sm,
 // deadlines without changing the source-frame processing order.
 static void service_animation_refresh(PIO pio, uint cyclotron_sm, uint cake_sm,
                                       runtime_state_t *state) {
-    if (state->config_flash_phase != 0) {
+    if (state->config_flash_phase != 0 || !lid_allows_animation(state)) {
         return;
     }
 
@@ -2345,9 +2352,11 @@ static void service_animation_refresh(PIO pio, uint cyclotron_sm, uint cake_sm,
     }
 }
 
-// Debounce the lid sense input and mirror its stable state to the open-drain
-// output unless the saved or compile-time bypass is active.
-static void service_lid_switch(runtime_state_t *state) {
+// Debounce the lid sense input, mirror it to the open-drain output, and clear
+// both animation chains as soon as an open lid becomes stable. Individual LED
+// tests remain available with the lid open for installation troubleshooting.
+static void service_lid_switch(PIO pio, uint cyclotron_sm, uint cake_sm,
+                               runtime_state_t *state) {
     if (lid_bypass_active() || !time_reached(state->next_lid_poll)) {
         return;
     }
@@ -2363,8 +2372,20 @@ static void service_lid_switch(runtime_state_t *state) {
                                      get_absolute_time()) >=
                    LID_DEBOUNCE_MS * 1000u) {
         state->lid_closed = closed;
-        set_lid_output(state->lid_closed);
+        if (!state->lid_closed) {
+            if (!cyclotron_test_active) {
+                output_cyclotron_off(pio, cyclotron_sm);
+            }
+            if (!cake_test_active) {
+                output_cake_off(pio, cake_sm);
+            }
+        }
     }
+
+    // Reassert the mirrored state every poll. Runtime configuration changes
+    // may have temporarily released the open-drain output without changing
+    // the already-debounced lid state.
+    set_lid_output(state->lid_closed);
 }
 
 // Debounce BOOTSEL, cycle the cyclotron palette on a short press, and toggle
@@ -2538,10 +2559,10 @@ int main(void) {
         finish_input_frame(pio, rx_sm, rx_offset, tx_sm, cake_tx_sm,
                            &runtime);
         service_config_request(pio, tx_sm, cake_tx_sm, &runtime);
-        service_test_deadlines(pio, tx_sm);
+        service_test_deadlines(pio, tx_sm, cake_tx_sm);
         service_idle_outputs(pio, tx_sm, cake_tx_sm, &runtime);
         service_animation_refresh(pio, tx_sm, cake_tx_sm, &runtime);
-        service_lid_switch(&runtime);
+        service_lid_switch(pio, tx_sm, cake_tx_sm, &runtime);
         service_bootsel_button(pio, tx_sm, cake_tx_sm, &runtime);
         service_config_flash(pio, tx_sm, &runtime);
         service_pending_save(&runtime);
