@@ -10,5 +10,6 @@
         "PICO_BOARD": "waveshare_rp2040_zero"
     },
     "cmake.buildDirectory": "${workspaceFolder}/build-debug",
-    "cmake.configureOnOpen": true
+    "cmake.configureOnOpen": true,
+    "idf.currentSetup": "/Users/morrisaaron/.espressif/v6.0/esp-idf"
 }
